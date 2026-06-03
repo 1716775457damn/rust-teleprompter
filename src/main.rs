@@ -100,6 +100,12 @@ enum LanguageFilter {
     EnglishOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiLanguage {
+    Chinese,
+    English,
+}
+
 struct TeleprompterApp {
     text: String,
     font_size: f32,
@@ -124,9 +130,17 @@ struct TeleprompterApp {
     language_filter: LanguageFilter,
     enable_focus_mode: bool, // Dim unread text blocks to enhance focus
     
-    // Presenter HUD Upgrades:
+    // Presenter HUD:
     elapsed_secs: f32, // Stopwatch elapsed time
     show_hud: bool, // Toggle Presenter Guide HUD (default true)
+    
+    // Localization & Window Features (v1.0.6):
+    ui_language: UiLanguage,
+    always_on_top: bool,
+    prev_always_on_top: bool,
+    enable_timer_limit: bool, // Count down instead of counting up
+    timer_limit_minutes: f32, // Total countdown timer in minutes
+    remaining_limit_secs: f32, // Countdown state variable in seconds
 }
 
 fn load_initial_text() -> String {
@@ -175,11 +189,98 @@ impl Default for TeleprompterApp {
             enable_focus_mode: true,
             elapsed_secs: 0.0,
             show_hud: true,
+            
+            ui_language: UiLanguage::Chinese, // Default to Chinese UI
+            always_on_top: false,
+            prev_always_on_top: false,
+            enable_timer_limit: true,
+            timer_limit_minutes: 4.5, // 4.5 minutes by default matching presentation length
+            remaining_limit_secs: 4.5 * 60.0,
         }
     }
 }
 
 impl TeleprompterApp {
+    // Translation dictionary mapping
+    fn tr(&self, key: &str) -> &'static str {
+        match self.ui_language {
+            UiLanguage::Chinese => match key {
+                "title" => "🚀 Sisyphus 专业级智能提词器",
+                "start_prompter" => "⚡ 启动提词器 (空格键)",
+                "settings" => "🎛️ 设置面板",
+                "font_size" => "字体大小:",
+                "scroll_speed" => "滚动速度:",
+                "line_height" => "行距倍数:",
+                "column_width" => "文本宽度:",
+                "mirror" => "🪞 水平镜像反转 (提词镜反射专用)",
+                "guide" => "🎯 显示黄金视线红辅助线",
+                "guide_pos" => "辅助线高度:",
+                "edge_fade" => "🎬 开启顶底边缘电影级淡出",
+                "focus_mode" => "👁️ 开启视线聚焦淡化模式",
+                "show_hud" => "📊 启用侧边 Presenter HUD 面板",
+                "lang_filter" => "文本语言过滤:",
+                "color_preset" => "配色主题:",
+                "shortcuts" => "⌨️ 快捷键说明 (提词模式)",
+                "sc_space" => "• 空格键：播放 / 暂停滚屏",
+                "sc_esc" => "• Esc 键：退出提词，返回编辑区",
+                "sc_arrows" => "• 上/下方向键：微调速度 (+/- 5)",
+                "sc_scroll" => "• 鼠标滚轮：滚屏 (暂停) / 调速 (播放)",
+                "sc_num" => "• 数字键 1-9：快速跳转对应 PPT 章节",
+                "sc_l" => "• L 键：循环切换中英文语言过滤",
+                "sc_h" => "• H 键：显示 / 隐藏侧边 HUD 面板",
+                "sc_minus" => "• 减号 (-) / 等号 (=)：微调辅助线高度",
+                "sc_r" => "• R 键：重置滚动位置与计时器",
+                "sc_m" => "• M 键：切换物理镜像模式",
+                "sc_g" => "• G 键：切换视线红辅助线",
+                "editor_title" => "📝 演讲稿编辑区 (实时自动存盘):",
+                "always_on_top" => "📌 窗口始终置顶 (Always on Top)",
+                "timer_limit" => "⏱️ 倒计时限制 (分钟):",
+                "timer_enable" => "启用限时倒计时",
+                "timer_ended" => "⚠️ 时间已到！",
+                 "timer_title" => "计时器",
+                 "ui_lang" => "界面语言 (UI Language):",
+                 _ => "",
+             },
+             UiLanguage::English => match key {
+                "title" => "🚀 Sisyphus Professional Smart Teleprompter",
+                "start_prompter" => "⚡ Start Prompter (Space)",
+                "settings" => "🎛️ Settings",
+                "font_size" => "Font Size:",
+                "scroll_speed" => "Scroll Speed:",
+                "line_height" => "Line Height:",
+                "column_width" => "Column Width:",
+                "mirror" => "🪞 Mirror Text (Horizontal Flip for Glass)",
+                "guide" => "🎯 Show Reading Guide Line",
+                "guide_pos" => "Guide Position:",
+                "edge_fade" => "🎬 Enable Cinema Edge Fade-Out",
+                "focus_mode" => "👁️ Enable Active Line Focus Mode",
+                "show_hud" => "📊 Enable Presenter Side HUD Panels",
+                "lang_filter" => "Language Block Filter:",
+                "color_preset" => "Color Preset:",
+                "shortcuts" => "⌨️ Shortcut Keys (Prompter Mode)",
+                "sc_space" => "• Spacebar: Play / Pause scrolling",
+                "sc_esc" => "• Esc: Exit to Edit Mode",
+                "sc_arrows" => "• Up / Down Arrow: Speed up / slow down (+/- 5)",
+                "sc_scroll" => "• Mouse Wheel: Scroll manually (paused) / adjust speed (playing)",
+                "sc_num" => "• Keys 1-9: Jump directly to mapped Page Sections",
+                "sc_l" => "• L Key: Toggle Language Filters",
+                "sc_h" => "• H Key: Toggle Presenter Guide HUD",
+                "sc_minus" => "• Minus (-) / Equals (=): Move guide line up/down",
+                "sc_r" => "• R Key: Reset scroll to top & timer",
+                "sc_m" => "• M Key: Toggle Mirroring",
+                "sc_g" => "• G Key: Toggle Guide line",
+                "editor_title" => "📝 Enter Presentation Script (Autosaved):",
+                "always_on_top" => "📌 Always on Top",
+                "timer_limit" => "⏱️ Time Limit (Minutes):",
+                "timer_enable" => "Enable Limit Countdown",
+                "timer_ended" => "⚠️ TIME'S UP!",
+                 "timer_title" => "Timer",
+                 "ui_lang" => "UI Language:",
+                 _ => "",
+             }
+        }
+    }
+
     fn apply_color_preset(&mut self) {
         match self.color_preset {
             ColorPreset::WhiteOnBlack => {
@@ -318,6 +419,17 @@ impl eframe::App for TeleprompterApp {
         let dt = now.duration_since(self.last_update).as_secs_f32();
         self.last_update = now;
 
+        // Viewport Always-on-top command dispatcher
+        if self.always_on_top != self.prev_always_on_top {
+            let level = if self.always_on_top {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+            self.prev_always_on_top = self.always_on_top;
+        }
+
         // Auto-scrolling in Prompter mode (with countdown pause)
         if self.mode == AppMode::Prompter {
             if self.countdown_secs > 0.0 {
@@ -329,6 +441,11 @@ impl eframe::App for TeleprompterApp {
             } else if self.is_playing {
                 self.scroll_y = (self.scroll_y + self.scroll_speed * dt).min(self.max_scroll);
                 self.elapsed_secs += dt;
+                
+                if self.enable_timer_limit {
+                    self.remaining_limit_secs = (self.remaining_limit_secs - dt).max(0.0);
+                }
+                
                 if self.scroll_y >= self.max_scroll {
                     self.is_playing = false;
                 }
@@ -357,18 +474,54 @@ impl TeleprompterApp {
         // Reset background back to a comfortable UI gray for editing
         ui.style_mut().visuals.override_text_color = None;
 
+        // Evaluate all translation keys FIRST to prevent immutable-mutable borrow conflicts on self
+        let tr_title = self.tr("title");
+        let tr_start_prompter = self.tr("start_prompter");
+        let tr_settings = self.tr("settings");
+        let tr_ui_lang = self.tr("ui_lang");
+        let tr_always_on_top = self.tr("always_on_top");
+        let tr_timer_enable = self.tr("timer_enable");
+        let tr_timer_limit = self.tr("timer_limit");
+        let tr_font_size = self.tr("font_size");
+        let tr_scroll_speed = self.tr("scroll_speed");
+        let tr_line_height = self.tr("line_height");
+        let tr_column_width = self.tr("column_width");
+        let tr_mirror = self.tr("mirror");
+        let tr_guide = self.tr("guide");
+        let tr_guide_pos = self.tr("guide_pos");
+        let tr_edge_fade = self.tr("edge_fade");
+        let tr_focus_mode = self.tr("focus_mode");
+        let tr_show_hud = self.tr("show_hud");
+        let tr_lang_filter = self.tr("lang_filter");
+        let tr_color_preset = self.tr("color_preset");
+        let tr_shortcuts = self.tr("shortcuts");
+        let tr_editor_title = self.tr("editor_title");
+        
+        let sc_space = self.tr("sc_space");
+        let sc_esc = self.tr("sc_esc");
+        let sc_arrows = self.tr("sc_arrows");
+        let sc_scroll = self.tr("sc_scroll");
+        let sc_num = self.tr("sc_num");
+        let sc_l = self.tr("sc_l");
+        let sc_h = self.tr("sc_h");
+        let sc_minus = self.tr("sc_minus");
+        let sc_r = self.tr("sc_r");
+        let sc_m = self.tr("sc_m");
+        let sc_g = self.tr("sc_g");
+
         ui.vertical(|ui| {
             // Header bar
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                ui.heading("🚀 Sisyphus Professional Rust Teleprompter");
+                ui.heading(tr_title);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⚡ Start Prompter (Spacebar)").clicked() {
+                    if ui.button(tr_start_prompter).clicked() {
                         self.mode = AppMode::Prompter;
                         self.scroll_y = 0.0;
                         self.countdown_secs = 3.0; // 3 seconds count down
                         self.is_playing = false;
                         self.elapsed_secs = 0.0;
+                        self.remaining_limit_secs = self.timer_limit_minutes * 60.0;
                         self.record_action();
                         self.last_update = Instant::now();
                     }
@@ -383,67 +536,110 @@ impl TeleprompterApp {
                 // Column 0: Controls
                 columns[0].vertical(|ui| {
                     ui.group(|ui| {
-                        ui.heading("🎛️ Settings");
+                        ui.heading(tr_settings);
                         ui.add_space(10.0);
 
+                        // UI Language Toggle Buttons
                         ui.horizontal(|ui| {
-                            ui.label("Font Size:");
+                            ui.label(tr_ui_lang);
+                            ui.selectable_value(&mut self.ui_language, UiLanguage::Chinese, "中文");
+                            ui.selectable_value(&mut self.ui_language, UiLanguage::English, "English");
+                        });
+                        ui.add_space(8.0);
+
+                        // Window always on top checkbox
+                        ui.checkbox(&mut self.always_on_top, tr_always_on_top);
+                        ui.add_space(6.0);
+
+                        // Timer configurations
+                        ui.checkbox(&mut self.enable_timer_limit, tr_timer_enable);
+                        if self.enable_timer_limit {
+                            ui.horizontal(|ui| {
+                                ui.label(tr_timer_limit);
+                                ui.add(egui::Slider::new(&mut self.timer_limit_minutes, 0.5..=15.0).suffix(" m"));
+                            });
+                        }
+                        ui.add_space(8.0);
+
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label(tr_font_size);
                             ui.add(egui::Slider::new(&mut self.font_size, 16.0..=120.0).suffix(" px"));
                         });
                         ui.add_space(6.0);
 
                         ui.horizontal(|ui| {
-                            ui.label("Scroll Speed:");
+                            ui.label(tr_scroll_speed);
                             ui.add(egui::Slider::new(&mut self.scroll_speed, 10.0..=500.0).suffix(" px/s"));
                         });
                         ui.add_space(6.0);
 
                         ui.horizontal(|ui| {
-                            ui.label("Line Height / Spacing:");
+                            ui.label(tr_line_height);
                             ui.add(egui::Slider::new(&mut self.line_spacing, 1.0..=2.5).suffix(" x"));
                         });
                         ui.add_space(6.0);
 
                         ui.horizontal(|ui| {
-                            ui.label("Text Column Width:");
+                            ui.label(tr_column_width);
                             ui.add(egui::Slider::new(&mut self.text_width_pct, 0.4..=0.95).text("Width %"));
                         });
                         ui.add_space(6.0);
 
-                        ui.checkbox(&mut self.is_mirrored, "🪞 Mirror Text (Horizontal Flip for Glass)");
-                        ui.checkbox(&mut self.show_guide, "🎯 Show Reading Guide Line");
+                        ui.checkbox(&mut self.is_mirrored, tr_mirror);
+                        ui.checkbox(&mut self.show_guide, tr_guide);
                         
                         if self.show_guide {
                             ui.horizontal(|ui| {
-                                ui.label("Guide Position:");
-                                ui.add(egui::Slider::new(&mut self.guide_y_pct, 0.1..=0.9).text("Height %"));
+                                ui.label(tr_guide_pos);
+                                ui.add(egui::Slider::new(&mut self.guide_y_pct, 0.1..=0.9));
                             });
                         }
                         ui.add_space(6.0);
 
-                        ui.checkbox(&mut self.show_edge_fade, "🎬 Enable Cinema Edge Fade-Out");
-                        ui.checkbox(&mut self.enable_focus_mode, "👁️ Enable Active Line Focus Mode");
-                        ui.checkbox(&mut self.show_hud, "📊 Enable Presenter Side HUD Panels");
+                        ui.checkbox(&mut self.show_edge_fade, tr_edge_fade);
+                        ui.checkbox(&mut self.enable_focus_mode, tr_focus_mode);
+                        ui.checkbox(&mut self.show_hud, tr_show_hud);
                         ui.add_space(6.0);
 
                         ui.horizontal(|ui| {
-                            ui.label("Language Block Filter:");
+                            ui.label(tr_lang_filter);
                             egui::ComboBox::from_id_source("lang_filter_combo")
                                 .selected_text(match self.language_filter {
-                                    LanguageFilter::All => "Show All (CN & EN)",
-                                    LanguageFilter::ChineseOnly => "Chinese Only (中文)",
-                                    LanguageFilter::EnglishOnly => "English Only",
+                                    LanguageFilter::All => match self.ui_language {
+                                        UiLanguage::Chinese => "全部显示 (中英文)",
+                                        UiLanguage::English => "Show All (CN & EN)",
+                                    },
+                                    LanguageFilter::ChineseOnly => match self.ui_language {
+                                        UiLanguage::Chinese => "仅中文",
+                                        UiLanguage::English => "Chinese Only (中文)",
+                                    },
+                                    LanguageFilter::EnglishOnly => match self.ui_language {
+                                        UiLanguage::Chinese => "仅英文 (English)",
+                                        UiLanguage::English => "English Only",
+                                    },
                                 })
                                 .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut self.language_filter, LanguageFilter::All, "Show All (CN & EN)");
-                                    ui.selectable_value(&mut self.language_filter, LanguageFilter::ChineseOnly, "Chinese Only (中文)");
-                                    ui.selectable_value(&mut self.language_filter, LanguageFilter::EnglishOnly, "English Only");
+                                    ui.selectable_value(&mut self.language_filter, LanguageFilter::All, match self.ui_language {
+                                        UiLanguage::Chinese => "全部显示 (中英文)",
+                                        UiLanguage::English => "Show All (CN & EN)",
+                                    });
+                                    ui.selectable_value(&mut self.language_filter, LanguageFilter::ChineseOnly, match self.ui_language {
+                                        UiLanguage::Chinese => "仅中文",
+                                        UiLanguage::English => "Chinese Only (中文)",
+                                    });
+                                    ui.selectable_value(&mut self.language_filter, LanguageFilter::EnglishOnly, match self.ui_language {
+                                        UiLanguage::Chinese => "仅英文 (English)",
+                                        UiLanguage::English => "English Only",
+                                    });
                                 });
                         });
                         ui.add_space(6.0);
 
                         ui.horizontal(|ui| {
-                            ui.label("Color Preset:");
+                            ui.label(tr_color_preset);
                             let prev_preset = self.color_preset;
                             egui::ComboBox::from_id_source("color_preset_combo")
                                 .selected_text(match self.color_preset {
@@ -468,27 +664,25 @@ impl TeleprompterApp {
 
                     ui.add_space(15.0);
                     ui.group(|ui| {
-                        ui.heading("⌨️ Shortcut Keys (Prompter Mode)");
+                        ui.heading(tr_shortcuts);
                         ui.add_space(6.0);
-                        ui.label("• Spacebar: Play / Pause scrolling");
-                        ui.label("• Esc: Exit to Edit Mode");
-                        ui.label("• Up / Down Arrow: Speed up / slow down (+/- 5)");
-                        ui.label("• Left / Right Arrow: Scroll backward / forward");
-                        ui.label("• Mouse Wheel: Scroll manually (paused) / adjust speed (playing)");
-                        ui.label("• Keys 1-9: Jump directly to mapped Page Sections!");
-                        ui.label("• L Key: Toggle Language Filters (All / CN / EN)");
-                        ui.label("• H Key: Toggle Presenter Guide HUD");
-                        ui.label("• Minus (-) / Equals (=): Move reading guide line up/down");
-                        ui.label("• R Key: Reset scroll to top & timer");
-                        ui.label("• M Key: Toggle Mirroring");
-                        ui.label("• G Key: Toggle Guide line");
-                        ui.label("• Enter: Skip Countdown immediately");
+                        ui.label(sc_space);
+                        ui.label(sc_esc);
+                        ui.label(sc_arrows);
+                        ui.label(sc_scroll);
+                        ui.label(sc_num);
+                        ui.label(sc_l);
+                        ui.label(sc_h);
+                        ui.label(sc_minus);
+                        ui.label(sc_r);
+                        ui.label(sc_m);
+                        ui.label(sc_g);
                     });
                 });
 
                 // Column 1: Script Editor (Auto-saves changes)
                 columns[1].vertical(|ui| {
-                    ui.label("📝 Enter Presentation Script (Autosaved):");
+                    ui.label(tr_editor_title);
                     ui.add_space(5.0);
                     let previous_text = self.text.clone();
                     let text_edit = egui::TextEdit::multiline(&mut self.text)
@@ -557,6 +751,7 @@ impl TeleprompterApp {
             self.is_playing = false;
             self.countdown_secs = 0.0;
             self.elapsed_secs = 0.0;
+            self.remaining_limit_secs = self.timer_limit_minutes * 60.0;
             self.record_action();
             ctx.request_repaint();
         }
@@ -788,20 +983,47 @@ impl TeleprompterApp {
             };
             let cyan_accent = egui::Color32::from_rgb(0, 188, 212);
 
-            // LEFT PANEL: Stopwatch Timer & Mini Table of Contents
+            // LEFT PANEL: Dynamic Timer & Mini Table of Contents
             let left_panel_x = rect.min.x + 20.0;
             
-            // Draw Stopwatch String
-            let mins = (self.elapsed_secs / 60.0) as i32;
-            let secs = (self.elapsed_secs % 60.0) as i32;
-            let timer_str = format!("⏱  {:02}:{:02}", mins, secs);
+            // Build Timer String (either Countdown or Stopwatch)
+            let timer_str = if self.enable_timer_limit {
+                let limit_mins = (self.remaining_limit_secs / 60.0) as i32;
+                let limit_secs = (self.remaining_limit_secs % 60.0) as i32;
+                if self.remaining_limit_secs <= 0.0 {
+                    self.tr("timer_ended").to_string()
+                } else {
+                    format!("⏱  {:02}:{:02}", limit_mins, limit_secs)
+                }
+            } else {
+                let mins = (self.elapsed_secs / 60.0) as i32;
+                let secs = (self.elapsed_secs % 60.0) as i32;
+                format!("⏱  {:02}:{:02}", mins, secs)
+            };
+
+            // Dynamic color for timer based on urgency
+            let timer_color = if self.enable_timer_limit {
+                if self.remaining_limit_secs == 0.0 {
+                    // Flash red
+                    if (self.elapsed_secs * 2.0) as i32 % 2 == 0 { egui::Color32::RED } else { hud_text_color }
+                } else if self.remaining_limit_secs <= 30.0 {
+                    egui::Color32::from_rgb(244, 67, 54) // Bright red
+                } else if self.remaining_limit_secs <= 60.0 {
+                    egui::Color32::from_rgb(255, 152, 0) // Amber warning
+                } else {
+                    cyan_accent
+                }
+            } else {
+                cyan_accent
+            };
+
             let font_timer = egui::FontId::new(22.0, egui::FontFamily::Proportional);
-            let timer_galley = ui.fonts(|f| f.layout(timer_str, font_timer, cyan_accent, f32::INFINITY));
+            let timer_galley = ui.fonts(|f| f.layout(timer_str, font_timer, timer_color, f32::INFINITY));
             self.paint_shape(
                 ctx,
                 ui.painter(),
                 ui.clip_rect(),
-                egui::Shape::galley(egui::Pos2::new(left_panel_x, rect.min.y + 50.0), timer_galley, cyan_accent),
+                egui::Shape::galley(egui::Pos2::new(left_panel_x, rect.min.y + 50.0), timer_galley, timer_color),
                 center_x,
             );
 
@@ -933,7 +1155,7 @@ impl TeleprompterApp {
             let overlay_bg = egui::Color32::from_rgba_unmultiplied(33, 33, 33, 200);
             let text_color = egui::Color32::WHITE;
             
-            // Estimate Remaining Time Calculation
+            // Estimate Remaining Time
             let remaining_time_str = if self.scroll_speed > 0.0 {
                 let remaining_secs = ((self.max_scroll - self.scroll_y) / self.scroll_speed).max(0.0);
                 let mins = (remaining_secs / 60.0) as i32;
@@ -1003,7 +1225,7 @@ Beyond agile hardware development, my second core achievement is the **full-stac
 
 === PAGE 3: Achievement 3: Systems Engineering & Commercialization ===
 [中文]
-请翻到第3页。我的第三个核心成果是大型系统的商业化运营。作为科技初创企业‘云影智巡’的CTO，我全面领导了机器人技术（包括教育无人机和仿生扑翼微型飞行器）的全栈研发。
+请翻到第3页。我的第三个核心成果是大型系统的商业化运营。作为科技初创企业‘云影智巡’的CTO，我全面领导了机器人技术（包括教育无人机 and 仿生扑翼微型飞行器）的全栈研发。
 
 图4在左侧展示了我们多代仿生扑翼无人机硬核的迭代过程。图5在右侧梳理了支持该产品矩阵的跨学科技术栈。基于ArduPilot和PX4等底层架构，我们成功攻克了罗盘校准和复杂PID调参等工程难题。
 
