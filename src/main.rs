@@ -93,6 +93,13 @@ enum ColorPreset {
     BlackOnWhite,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LanguageFilter {
+    All,
+    ChineseOnly,
+    EnglishOnly,
+}
+
 struct TeleprompterApp {
     text: String,
     font_size: f32,
@@ -108,14 +115,16 @@ struct TeleprompterApp {
     mode: AppMode,
     last_update: Instant,
     last_action_time: Instant, // For auto-hiding prompt info
-    
-    // Upgrades:
     text_width_pct: f32, // Margins / width control (0.4 to 0.95 of screen)
     countdown_secs: f32, // Preparation countdown (e.g. 3.0s)
     show_edge_fade: bool, // Top and bottom gradient fades
     line_spacing: f32, // Line height multiplier (1.0 to 2.5)
     sections: Vec<(String, f32)>, // Store header names and their scroll Y offsets
     max_scroll: f32, // Store dynamically calculated max scroll limit
+    
+    // Iteration Upgrades:
+    language_filter: LanguageFilter,
+    enable_focus_mode: bool, // Dim unread text blocks to enhance focus
 }
 
 fn load_initial_text() -> String {
@@ -160,6 +169,8 @@ impl Default for TeleprompterApp {
             line_spacing: 1.4,
             sections: Vec::new(),
             max_scroll: 1000.0,
+            language_filter: LanguageFilter::All,
+            enable_focus_mode: true,
         }
     }
 }
@@ -223,6 +234,57 @@ impl TeleprompterApp {
             self.record_action();
         }
     }
+}
+
+// Custom Markdown-style bold segment parser (`**text**` -> highlighting)
+fn parse_formatted_line(
+    text: &str,
+    font_size: f32,
+    base_color: egui::Color32,
+    accent_color: egui::Color32,
+    wrapping_width: f32,
+    is_header: bool,
+    is_meta: bool,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = wrapping_width;
+    
+    let final_font_size = if is_header {
+        font_size * 1.1
+    } else if is_meta {
+        font_size * 0.8
+    } else {
+        font_size
+    };
+
+    let final_base_color = if is_header {
+        egui::Color32::from_rgb(0, 188, 212) // Cyan for headers
+    } else if is_meta {
+        egui::Color32::from_rgb(120, 144, 156) // Muted blue-grey for metadata/tags
+    } else {
+        base_color
+    };
+
+    let parts: Vec<&str> = text.split("**").collect();
+    let mut is_bold = false;
+    for part in parts {
+        let color = if is_bold { accent_color } else { final_base_color };
+        
+        let text_format = egui::TextFormat {
+            font_id: egui::FontId::new(final_font_size, egui::FontFamily::Proportional),
+            color,
+            background: egui::Color32::TRANSPARENT,
+            italics: false,
+            underline: if is_bold { egui::Stroke::new(2.0, accent_color) } else { egui::Stroke::NONE },
+            strikethrough: egui::Stroke::NONE,
+            valign: egui::Align::BOTTOM,
+            ..Default::default()
+        };
+        
+        job.append(part, 0.0, text_format);
+        is_bold = !is_bold;
+    }
+    job
 }
 
 impl eframe::App for TeleprompterApp {
@@ -333,6 +395,23 @@ impl TeleprompterApp {
                         ui.add_space(6.0);
 
                         ui.checkbox(&mut self.show_edge_fade, "🎬 Enable Cinema Edge Fade-Out");
+                        ui.checkbox(&mut self.enable_focus_mode, "👁️ Enable Active Line Focus Mode");
+                        ui.add_space(6.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Language Block Filter:");
+                            egui::ComboBox::from_id_source("lang_filter_combo")
+                                .selected_text(match self.language_filter {
+                                    LanguageFilter::All => "Show All (CN & EN)",
+                                    LanguageFilter::ChineseOnly => "Chinese Only (中文)",
+                                    LanguageFilter::EnglishOnly => "English Only",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.language_filter, LanguageFilter::All, "Show All (CN & EN)");
+                                    ui.selectable_value(&mut self.language_filter, LanguageFilter::ChineseOnly, "Chinese Only (中文)");
+                                    ui.selectable_value(&mut self.language_filter, LanguageFilter::EnglishOnly, "English Only");
+                                });
+                        });
                         ui.add_space(6.0);
 
                         ui.horizontal(|ui| {
@@ -369,6 +448,8 @@ impl TeleprompterApp {
                         ui.label("• Left / Right Arrow: Scroll backward / forward");
                         ui.label("• Mouse Wheel: Scroll manually (paused) / adjust speed (playing)");
                         ui.label("• Keys 1-9: Jump directly to mapped Page Sections!");
+                        ui.label("• L Key: Toggle Language Filters (All / CN / EN)");
+                        ui.label("• Minus (-) / Equals (=): Move reading guide line up/down");
                         ui.label("• R Key: Reset scroll to top");
                         ui.label("• M Key: Toggle Mirroring");
                         ui.label("• G Key: Toggle Guide line");
@@ -456,6 +537,25 @@ impl TeleprompterApp {
             self.show_guide = !self.show_guide;
             self.record_action();
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::L)) {
+            self.language_filter = match self.language_filter {
+                LanguageFilter::All => LanguageFilter::ChineseOnly,
+                LanguageFilter::ChineseOnly => LanguageFilter::EnglishOnly,
+                LanguageFilter::EnglishOnly => LanguageFilter::All,
+            };
+            self.record_action();
+            ctx.request_repaint();
+        }
+
+        // Reading Guide Line Y Adjustments via keyboard shortcuts (-) and (=)
+        if ctx.input(|i| i.key_pressed(egui::Key::Minus)) {
+            self.guide_y_pct = (self.guide_y_pct - 0.02).max(0.1);
+            self.record_action();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Equals)) {
+            self.guide_y_pct = (self.guide_y_pct + 0.02).min(0.9);
+            self.record_action();
+        }
 
         // Quick Jumps (Keys 1-9)
         if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { self.jump_to_section(0); }
@@ -494,35 +594,55 @@ impl TeleprompterApp {
         // Paragraph-based custom layout loop with syntax highlighting and jump section calculations
         let mut current_y = 0.0;
         let mut temp_sections = Vec::new();
+        
+        // Tracks stateful language blocks in parsing
+        let mut current_block_lang = LanguageFilter::All;
+        let bold_highlight_color = egui::Color32::from_rgb(255, 179, 0); // Amber/orange for bold text emphasis
 
         for line in self.text.lines() {
-            let is_header = line.trim().starts_with("===");
-            let is_meta = line.trim().starts_with("[") || line.trim().starts_with("【");
+            let trimmed = line.trim();
             
-            let (font, color, extra_space) = if is_header {
-                let clean_name = line.replace("===", "").trim().to_string();
+            // Detect block language tags
+            if trimmed.starts_with("[中文]") || trimmed.starts_with("【中文】") {
+                current_block_lang = LanguageFilter::ChineseOnly;
+            } else if trimmed.starts_with("[English]") || trimmed.starts_with("[英文]") {
+                current_block_lang = LanguageFilter::EnglishOnly;
+            } else if trimmed.starts_with("===") {
+                current_block_lang = LanguageFilter::All; // Headings are always displayed
+            }
+            
+            // Apply language filter
+            if self.language_filter != LanguageFilter::All && current_block_lang != LanguageFilter::All {
+                if current_block_lang != self.language_filter {
+                    continue; // Skip rendering & layout calculation for filtered language
+                }
+            }
+
+            let is_header = trimmed.starts_with("===");
+            let is_meta = trimmed.starts_with("[") || trimmed.starts_with("【");
+            
+            let extra_space = if is_header {
+                let clean_name = trimmed.replace("===", "").trim().to_string();
                 temp_sections.push((clean_name, current_y));
-                (
-                    egui::FontId::new(self.font_size * 1.05, egui::FontFamily::Proportional),
-                    egui::Color32::from_rgb(0, 188, 212), // Vibrant Cyan for headers
-                    self.font_size * 0.8
-                )
+                self.font_size * 0.8
             } else if is_meta {
-                (
-                    egui::FontId::new(self.font_size * 0.8, egui::FontFamily::Proportional),
-                    egui::Color32::from_rgb(120, 144, 156), // Muted blue-grey for markers
-                    self.font_size * 0.2
-                )
+                self.font_size * 0.2
             } else {
-                (
-                    egui::FontId::new(self.font_size, egui::FontFamily::Proportional),
-                    self.text_color,
-                    0.0
-                )
+                0.0
             };
 
-            // Layout the line/paragraph using the correct font
-            let galley = ui.fonts(|f| f.layout(line.to_string(), font, color, wrapping_width));
+            // Layout the line/paragraph using the correct format and bold parser
+            let mut job = parse_formatted_line(
+                trimmed,
+                self.font_size,
+                self.text_color,
+                bold_highlight_color,
+                wrapping_width,
+                is_header,
+                is_meta,
+            );
+            
+            let galley = ui.fonts(|f| f.layout_job(job.clone()));
             let galley_height = galley.rect.height();
 
             // Calculate precise Y drawing position relative to the scroll state
@@ -530,8 +650,25 @@ impl TeleprompterApp {
 
             // Frustum Culling: Draw only if the text is physically visible on the screen
             if draw_pos_y + galley_height > 0.0 && draw_pos_y < height {
+                // Focus Mode Opacity Calculation: dim elements far from the guide line
+                if self.enable_focus_mode && !is_header {
+                    let distance_from_guide = (draw_pos_y - guide_y).abs();
+                    let max_distance = 150.0;
+                    let opacity = if distance_from_guide < max_distance {
+                        let t = distance_from_guide / max_distance;
+                        1.0 - t * 0.65 // Dim down to 35% opacity
+                    } else {
+                        0.35
+                    };
+                    for section in &mut job.sections {
+                        section.format.color = section.format.color.linear_multiply(opacity);
+                    }
+                }
+                
+                // Re-lay out with updated opacity values
+                let final_galley = ui.fonts(|f| f.layout_job(job));
                 let text_pos = egui::Pos2::new(rect.min.x + padding, rect.min.y + draw_pos_y);
-                let shape = egui::Shape::galley(text_pos, galley, color);
+                let shape = egui::Shape::galley(text_pos, final_galley, self.text_color);
 
                 if self.is_mirrored {
                     // Mirror shape mesh horizontally
@@ -560,7 +697,7 @@ impl TeleprompterApp {
 
         // Cache calculated offsets
         self.sections = temp_sections;
-        self.max_scroll = current_y;
+        self.max_scroll = (current_y - height + guide_y + 100.0).max(0.0);
 
         // 2. Draw Reading Guide Line (semitransparent horizontal guide)
         if self.show_guide {
@@ -624,7 +761,7 @@ impl TeleprompterApp {
 
         // 4. Draw Scrolling Progress Bar (Cyan thin line at the top)
         if self.max_scroll > 0.0 {
-            let progress = self.scroll_y / self.max_scroll;
+            let progress = (self.scroll_y / self.max_scroll).clamp(0.0, 1.0);
             let progress_width = width * progress;
             let bar_rect = egui::Rect::from_min_max(
                 rect.left_top(),
@@ -671,6 +808,16 @@ impl TeleprompterApp {
             let overlay_bg = egui::Color32::from_rgba_unmultiplied(33, 33, 33, 200);
             let text_color = egui::Color32::WHITE;
             
+            // Estimate Remaining Time Calculation
+            let remaining_time_str = if self.scroll_speed > 0.0 {
+                let remaining_secs = ((self.max_scroll - self.scroll_y) / self.scroll_speed).max(0.0);
+                let mins = (remaining_secs / 60.0) as i32;
+                let secs = (remaining_secs % 60.0) as i32;
+                format!("{:02}:{:02}", mins, secs)
+            } else {
+                "--:--".to_string()
+            };
+
             egui::Area::new(egui::Id::new("overlay_area"))
                 .anchor(egui::Align2::RIGHT_BOTTOM, egui::Vec2::new(-15.0, -15.0))
                 .show(ctx, |ui| {
@@ -682,12 +829,19 @@ impl TeleprompterApp {
                             ui.style_mut().visuals.override_text_color = Some(text_color);
                             ui.horizontal(|ui| {
                                 let state_str = if self.is_playing { "▶ PLAYING" } else { "⏸ PAUSED" };
+                                let lang_str = match self.language_filter {
+                                    LanguageFilter::All => "All",
+                                    LanguageFilter::ChineseOnly => "CN Only",
+                                    LanguageFilter::EnglishOnly => "EN Only",
+                                };
                                 ui.label(format!(
-                                    "[{}] Speed: {:.0} px/s | Width: {:.0}% | Mirror: {} | ESC: Exit",
+                                    "[{}] Rem: {} | Speed: {:.0} px/s | Width: {:.0}% | Lang: {} | Focus: {} | ESC: Exit",
                                     state_str,
+                                    remaining_time_str,
                                     self.scroll_speed,
                                     self.text_width_pct * 100.0,
-                                    if self.is_mirrored { "ON" } else { "OFF" }
+                                    lang_str,
+                                    if self.enable_focus_mode { "ON" } else { "OFF" }
                                 ));
                             });
                         });
@@ -698,29 +852,29 @@ impl TeleprompterApp {
 
 const DEFAULT_TEXT: &str = r#"=== PAGE 1: Opening & Hardware Product Definition ===
 [中文]
-各位评委老师，早上好。我是陶鑫旺。正如我作品集第一页所示，我将自己定位为机器人系统研发工程师与工业AI全栈实践者。我始终致力于打破代码与物理世界之间的边界。
+各位评委老师，早上好。我是陶鑫旺。正如我作品集第一页所示，我将自己定位为**机器人系统研发工程师**与**工业AI全栈实践者**。我始终致力于打破代码与物理世界之间的边界。
 
-我的第一个核心成果在于硬件产品定义。在李泽湘教授指导的InnoX创业营期间——您可以在图1中看到我们的路演合影——我主导了智能硬件Lumina从0到1的开发。针对年轻人因高功能焦虑引起的‘决策瘫痪’，我们创新地设计了‘配重转子动态阻尼扭矩反馈’的物理机制，将心理学机制具象化地实现在物理世界中。
+我的第一个核心成果在于**硬件产品定义**。在李泽湘教授指导的InnoX创业营期间——您可以在图1中看到我们的路演合影——我主导了智能硬件Lumina从0到1的开发。针对年轻人因高功能焦虑引起的‘决策瘫痪’，我们创新地设计了**‘配重转子动态阻尼扭矩反馈’**的物理机制，将心理学机制具象化地实现在物理世界中。
 
 [English]
-Good morning, respected judges. I am Xinwang Tao. As shown on the first page of my portfolio, I position myself as a Robotics System R&D Engineer and an Industrial AI Full-Stack Practitioner. I am always driven to break the boundaries between code and the physical world.
+Good morning, respected judges. I am Xinwang Tao. As shown on the first page of my portfolio, I position myself as a **Robotics System R&D Engineer** and an **Industrial AI Full-Stack Practitioner**. I am always driven to break the boundaries between code and the physical world.
 
-My first core achievement lies in hardware product definition. During the InnoX Camp mentored by Prof. Zexiang Li—you can see our roadshow group photo in Fig. 1—I led the 0-to-1 development of the smart hardware, Lumina. Targeting the 'decision paralysis' caused by high-functioning anxiety among young people, we innovatively designed a physical mechanism with 'weighted rotor dynamic damping torque feedback,' reifying psychological mechanisms into the physical world.
+My first core achievement lies in **hardware product definition**. During the InnoX Camp mentored by Prof. Zexiang Li—you can see our roadshow group photo in Fig. 1—I led the 0-to-1 development of the smart hardware, Lumina. Targeting the 'decision paralysis' caused by high-functioning anxiety among young people, we innovatively designed a physical mechanism with **'weighted rotor dynamic damping torque feedback,'** reifying psychological mechanisms into the physical world.
 
 === PAGE 2: Commercial Updates & Achievement 2: Industrial AI ===
 [中文]
 请翻到第2页。在产品落地阶段，如顶部图2所示，通过持续、高强度的MVP快速迭代，我们成功打磨出了一款高度精致的产品Demo。
 
-更令人兴奋的是，该项目目前正加速迈向深度商业化。我们团队最近迎来了两位实力强劲的新伙伴，目前正全力进军国际市场流量。我们正积极建立海外种子用户社区，并筹备在Kickstarter上发起众筹活动。这一从产品定义、Demo实现到全球化拓展的完整历程，使我荣获了‘优秀产品经理’称号。
+**更令人兴奋的是，该项目目前正加速迈向深度商业化。我们团队最近迎来了两位实力强劲的新伙伴，目前正全力进军国际市场流量。我们正积极建立海外种子用户社区，并筹备在Kickstarter上发起众筹活动。** 这一从产品定义、Demo实现到全球化拓展的完整历程，使我荣获了‘优秀产品经理’称号。
 
-除了敏捷硬件开发，我的第二个核心成果是前线工业级AI的全栈部署。请看中间的图3；这是我构建的工业AI Agent决策流架构。面对复杂、非标的SMT车间，我开发了一套高效的视频处理管线，清洗了1289个异常视频片段，作为视觉大模型（VLM）微调的基础。基于LangGraph状态机 and ReAct逻辑，该闭环系统现已部署于实际生产线，展现出替代约30%重度人工视觉检测岗位的巨大潜力。
+除了敏捷硬件开发，我的第二个核心成果是**前线工业级AI的全栈部署**。请看中间的图3；这是我构建的工业AI Agent决策流架构。面对复杂、非标的SMT车间，我开发了一套高效的视频处理管线，清洗了1289个异常视频片段，作为视觉大模型（VLM）微调的基础。基于LangGraph状态机和ReAct逻辑，该闭环系统现已部署于实际生产线，展现出替代约30%重度人工视觉检测岗位的巨大潜力。
 
 [English]
 Please turn to PAGE 2. In the product implementation phase, as shown in Fig. 2 at the top, through continuous, high-intensity MVP rapid iterations, we have successfully polished a highly refined product Demo.
 
-Even more excitingly, this project is now accelerating into deep commercialization. We recently onboarded two strong partners to our team and are now fully targeting international market traffic. We are actively building our overseas seed user community and preparing to launch a crowdfunding campaign on Kickstarter. This complete journey from product definition and Demo realization to global expansion earned me the 'Outstanding Product Manager' title.
+**Even more excitingly, this project is now accelerating into deep commercialization. We recently onboarded two strong partners to our team and are now fully targeting international market traffic. We are actively building our overseas seed user community and preparing to launch a crowdfunding campaign on Kickstarter.** This complete journey from product definition and Demo realization to global expansion earned me the 'Outstanding Product Manager' title.
 
-Beyond agile hardware development, my second core achievement is the full-stack deployment of frontline industrial AI. Please look at Fig. 3 in the middle; this is the industrial AI Agent decision-making flow architecture I built. Facing the complex, non-standard SMT workshops, I developed a highly efficient video processing pipeline, cleaning 1,289 error-related video segments as a Vision Large Model (VLM) fine-tuning foundation. Based on the LangGraph state machine and ReAct logic, this closed-loop system is now deployed on actual production lines, demonstrating the immense potential to replace approximately 30% of heavy manual visual inspection roles.
+Beyond agile hardware development, my second core achievement is the **full-stack deployment of frontline industrial AI**. Please look at Fig. 3 in the middle; this is the industrial AI Agent decision-making flow architecture I built. Facing the complex, non-standard SMT workshops, I developed a highly efficient video processing pipeline, cleaning 1,289 error-related video segments as a Vision Large Model (VLM) fine-tuning foundation. Based on the LangGraph state machine and ReAct logic, this closed-loop system is now deployed on actual production lines, demonstrating the immense potential to replace approximately 30% of heavy manual visual inspection roles.
 
 === PAGE 3: Achievement 3: Systems Engineering & Commercialization ===
 [中文]
@@ -737,12 +891,12 @@ Fig. 4 on the left displays the hardcore iterative process of our multi-generati
 [中文]
 第4页展示了我们的商业验证与技术护城河。图6来自于我们在‘互联网+’大赛中荣获国家级银奖的颁奖现场。图7是我们公司在湖南股权交易所成功挂牌的证书。
 
-为了构建技术壁垒，作为核心发明人，我累计获得了10余项发明专利与软件著作权。此外，底部的图9证明了我已获得鸿蒙（HarmonyOS）高级应用开发者认证，展现出全面的生态构建能力。
+为了构建技术壁垒，作为核心发明人，我累计获得了**10余项发明专利与软件著作权**。此外，底部的图9证明了我已获得鸿蒙（HarmonyOS）高级应用开发者认证，展现出全面的生态构建能力。
 
 [English]
 PAGE 4 showcases our commercial validation and technical moats. Fig. 6 is from the site where we won the National Silver Award in the 'Internet+' Competition. Fig. 7 is the certificate of our company's successful listing on the Hunan Equity Exchange.
 
-To build technical barriers, as shown in Fig. 8 in the middle, I accumulated over 10 invention patents and software copyrights as the core inventor. Additionally, Fig. 9 at the bottom proves that I obtained the HarmonyOS Advanced Application Developer Certification, demonstrating a comprehensive ecosystem-building capability.
+To build technical barriers, as shown in Fig. 8 in the middle, I accumulated **over 10 invention patents and software copyrights** as the core inventor. Additionally, Fig. 9 at the bottom proves that I obtained the HarmonyOS Advanced Application Developer Certification, demonstrating a comprehensive ecosystem-building capability.
 
 === PAGE 5: Achievement 4: Academic Research & Theory ===
 [中文]
@@ -759,7 +913,7 @@ Fig. 12 on the bottom left is my research on a bionic UAV spatial linkage mechan
 [中文]
 最后，请看第6页。顶部区域总结了我的全栈技能树。从熟练使用Cursor等AI工具构建自动化工作流，到将边缘计算底层彻底从C++重构为性能更高的Rust语言并部署在ESP32-S3微控制器上——我正不断且敏捷地迭代我的技术边界。
 
-我坚信，顶尖的技术创新是数字计算与人类感官体验的深度共鸣。我非常渴望加入贵团队，与顶尖的跨学科头脑进行思想碰撞，共同定义机器人与自主系统（RAS）的下一个颠覆性范式！谢谢大家。
+我坚信，顶尖的技术创新是**数字计算与人类感官体验的深度共鸣**。我非常渴望加入贵团队，与顶尖的跨学科头脑进行思想碰撞，共同定义机器人与自主系统（RAS）的下一个颠覆性范式！谢谢大家。
 
 [English]
 Finally, please look at PAGE 6. The top section summarizes my full-stack skill tree. From proficiently using AI tools like Cursor to build automated workflows, to completely refactoring the edge computing base from C++ to the higher-performance Rust language and deploying it on ESP32-S3 microcontrollers—I am constantly and agilely iterating my technical boundaries.
