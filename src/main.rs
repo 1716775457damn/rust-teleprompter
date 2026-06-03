@@ -121,10 +121,12 @@ struct TeleprompterApp {
     line_spacing: f32, // Line height multiplier (1.0 to 2.5)
     sections: Vec<(String, f32)>, // Store header names and their scroll Y offsets
     max_scroll: f32, // Store dynamically calculated max scroll limit
-    
-    // Iteration Upgrades:
     language_filter: LanguageFilter,
     enable_focus_mode: bool, // Dim unread text blocks to enhance focus
+    
+    // Presenter HUD Upgrades:
+    elapsed_secs: f32, // Stopwatch elapsed time
+    show_hud: bool, // Toggle Presenter Guide HUD (default true)
 }
 
 fn load_initial_text() -> String {
@@ -171,6 +173,8 @@ impl Default for TeleprompterApp {
             max_scroll: 1000.0,
             language_filter: LanguageFilter::All,
             enable_focus_mode: true,
+            elapsed_secs: 0.0,
+            show_hud: true,
         }
     }
 }
@@ -232,6 +236,27 @@ impl TeleprompterApp {
         if idx < self.sections.len() {
             self.scroll_y = self.sections[idx].1;
             self.record_action();
+        }
+    }
+
+    // Tessellates and draws a shape, mirroring it horizontally if `is_mirrored` is enabled
+    fn paint_shape(&self, ctx: &egui::Context, painter: &egui::Painter, clip_rect: egui::Rect, shape: egui::Shape, center_x: f32) {
+        if self.is_mirrored {
+            let clipped_shape = egui::epaint::ClippedShape {
+                clip_rect,
+                shape,
+            };
+            let primitives = ctx.tessellate(vec![clipped_shape], ctx.pixels_per_point());
+            for primitive in primitives {
+                if let egui::epaint::Primitive::Mesh(mut mesh) = primitive.primitive {
+                    for vertex in &mut mesh.vertices {
+                        vertex.pos.x = center_x - (vertex.pos.x - center_x);
+                    }
+                    painter.add(egui::Shape::mesh(mesh));
+                }
+            }
+        } else {
+            painter.add(shape);
         }
     }
 }
@@ -303,6 +328,7 @@ impl eframe::App for TeleprompterApp {
                 ctx.request_repaint();
             } else if self.is_playing {
                 self.scroll_y = (self.scroll_y + self.scroll_speed * dt).min(self.max_scroll);
+                self.elapsed_secs += dt;
                 if self.scroll_y >= self.max_scroll {
                     self.is_playing = false;
                 }
@@ -342,6 +368,7 @@ impl TeleprompterApp {
                         self.scroll_y = 0.0;
                         self.countdown_secs = 3.0; // 3 seconds count down
                         self.is_playing = false;
+                        self.elapsed_secs = 0.0;
                         self.record_action();
                         self.last_update = Instant::now();
                     }
@@ -396,6 +423,7 @@ impl TeleprompterApp {
 
                         ui.checkbox(&mut self.show_edge_fade, "🎬 Enable Cinema Edge Fade-Out");
                         ui.checkbox(&mut self.enable_focus_mode, "👁️ Enable Active Line Focus Mode");
+                        ui.checkbox(&mut self.show_hud, "📊 Enable Presenter Side HUD Panels");
                         ui.add_space(6.0);
 
                         ui.horizontal(|ui| {
@@ -449,8 +477,9 @@ impl TeleprompterApp {
                         ui.label("• Mouse Wheel: Scroll manually (paused) / adjust speed (playing)");
                         ui.label("• Keys 1-9: Jump directly to mapped Page Sections!");
                         ui.label("• L Key: Toggle Language Filters (All / CN / EN)");
+                        ui.label("• H Key: Toggle Presenter Guide HUD");
                         ui.label("• Minus (-) / Equals (=): Move reading guide line up/down");
-                        ui.label("• R Key: Reset scroll to top");
+                        ui.label("• R Key: Reset scroll to top & timer");
                         ui.label("• M Key: Toggle Mirroring");
                         ui.label("• G Key: Toggle Guide line");
                         ui.label("• Enter: Skip Countdown immediately");
@@ -482,6 +511,7 @@ impl TeleprompterApp {
         let rect = ui.max_rect();
         let width = rect.width();
         let height = rect.height();
+        let center_x = rect.center().x;
         
         // Listen to global inputs
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
@@ -526,6 +556,7 @@ impl TeleprompterApp {
             self.scroll_y = 0.0;
             self.is_playing = false;
             self.countdown_secs = 0.0;
+            self.elapsed_secs = 0.0;
             self.record_action();
             ctx.request_repaint();
         }
@@ -535,6 +566,10 @@ impl TeleprompterApp {
         }
         if ctx.input(|i| i.key_pressed(egui::Key::G)) {
             self.show_guide = !self.show_guide;
+            self.record_action();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::H)) {
+            self.show_hud = !self.show_hud;
             self.record_action();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::L)) {
@@ -669,26 +704,7 @@ impl TeleprompterApp {
                 let final_galley = ui.fonts(|f| f.layout_job(job));
                 let text_pos = egui::Pos2::new(rect.min.x + padding, rect.min.y + draw_pos_y);
                 let shape = egui::Shape::galley(text_pos, final_galley, self.text_color);
-
-                if self.is_mirrored {
-                    // Mirror shape mesh horizontally
-                    let center_x = rect.center().x;
-                    let clipped_shape = egui::epaint::ClippedShape {
-                        clip_rect: ui.clip_rect(),
-                        shape,
-                    };
-                    let primitives = ctx.tessellate(vec![clipped_shape], ctx.pixels_per_point());
-                    for primitive in primitives {
-                        if let egui::epaint::Primitive::Mesh(mut mesh) = primitive.primitive {
-                            for vertex in &mut mesh.vertices {
-                                vertex.pos.x = center_x - (vertex.pos.x - center_x);
-                            }
-                            ui.painter().add(egui::Shape::mesh(mesh));
-                        }
-                    }
-                } else {
-                    ui.painter().add(shape);
-                }
+                self.paint_shape(ctx, ui.painter(), ui.clip_rect(), shape, center_x);
             }
 
             // Increment scroll offsets
@@ -699,46 +715,49 @@ impl TeleprompterApp {
         self.sections = temp_sections;
         self.max_scroll = (current_y - height + guide_y + 100.0).max(0.0);
 
+        // Calculate active section index
+        let mut active_sec_idx = None;
+        for (idx, &(_, offset_y)) in self.sections.iter().enumerate() {
+            if self.scroll_y >= offset_y - 30.0 {
+                active_sec_idx = Some(idx);
+            }
+        }
+
         // 2. Draw Reading Guide Line (semitransparent horizontal guide)
         if self.show_guide {
             let guide_color = egui::Color32::from_rgba_unmultiplied(239, 83, 80, 75); // Subtle red line
             let stroke = egui::Stroke::new(2.0, guide_color);
-            ui.painter().line_segment(
-                [
-                    egui::Pos2::new(rect.min.x + 15.0, rect.min.y + guide_y),
-                    egui::Pos2::new(rect.max.x - 15.0, rect.min.y + guide_y),
-                ],
-                stroke,
+            self.paint_shape(
+                ctx,
+                ui.painter(),
+                ui.clip_rect(),
+                egui::Shape::line_segment(
+                    [
+                        egui::Pos2::new(rect.min.x + 15.0, rect.min.y + guide_y),
+                        egui::Pos2::new(rect.max.x - 15.0, rect.min.y + guide_y),
+                    ],
+                    stroke,
+                ),
+                center_x,
             );
             
             // Side arrow indicators pointing inwards
             let arrow_color = egui::Color32::from_rgb(239, 83, 80);
             
-            let mut left_arrow = vec![
+            let left_arrow = vec![
                 egui::Pos2::new(rect.min.x + 15.0, rect.min.y + guide_y - 8.0),
                 egui::Pos2::new(rect.min.x + 15.0, rect.min.y + guide_y + 8.0),
                 egui::Pos2::new(rect.min.x + 30.0, rect.min.y + guide_y),
             ];
             
-            let mut right_arrow = vec![
+            let right_arrow = vec![
                 egui::Pos2::new(rect.max.x - 15.0, rect.min.y + guide_y - 8.0),
                 egui::Pos2::new(rect.max.x - 15.0, rect.min.y + guide_y + 8.0),
                 egui::Pos2::new(rect.max.x - 30.0, rect.min.y + guide_y),
             ];
 
-            if self.is_mirrored {
-                // If mirrored, flip the visual guides too so they remain aligned with physical view
-                let center_x = rect.center().x;
-                for p in &mut left_arrow {
-                    p.x = center_x - (p.x - center_x);
-                }
-                for p in &mut right_arrow {
-                    p.x = center_x - (p.x - center_x);
-                }
-            }
-
-            ui.painter().add(egui::Shape::convex_polygon(left_arrow, arrow_color, egui::Stroke::NONE));
-            ui.painter().add(egui::Shape::convex_polygon(right_arrow, arrow_color, egui::Stroke::NONE));
+            self.paint_shape(ctx, ui.painter(), ui.clip_rect(), egui::Shape::convex_polygon(left_arrow, arrow_color, egui::Stroke::NONE), center_x);
+            self.paint_shape(ctx, ui.painter(), ui.clip_rect(), egui::Shape::convex_polygon(right_arrow, arrow_color, egui::Stroke::NONE), center_x);
         }
 
         // 3. Draw Cinema Edge Gradient Fades
@@ -759,7 +778,107 @@ impl TeleprompterApp {
             self.draw_fade_gradient(ui.painter(), bottom_rect, self.bg_color, false);
         }
 
-        // 4. Draw Scrolling Progress Bar (Cyan thin line at the top)
+        // 4. Draw Presenter Guide HUD (Left/Right panels in margins)
+        let has_room_for_hud = padding >= 150.0;
+        if self.show_hud && has_room_for_hud && self.countdown_secs <= 0.0 {
+            let hud_text_color = if self.bg_color == egui::Color32::WHITE {
+                egui::Color32::DARK_GRAY
+            } else {
+                egui::Color32::from_rgb(176, 190, 197) // Clean secondary grey
+            };
+            let cyan_accent = egui::Color32::from_rgb(0, 188, 212);
+
+            // LEFT PANEL: Stopwatch Timer & Mini Table of Contents
+            let left_panel_x = rect.min.x + 20.0;
+            
+            // Draw Stopwatch String
+            let mins = (self.elapsed_secs / 60.0) as i32;
+            let secs = (self.elapsed_secs % 60.0) as i32;
+            let timer_str = format!("⏱  {:02}:{:02}", mins, secs);
+            let font_timer = egui::FontId::new(22.0, egui::FontFamily::Proportional);
+            let timer_galley = ui.fonts(|f| f.layout(timer_str, font_timer, cyan_accent, f32::INFINITY));
+            self.paint_shape(
+                ctx,
+                ui.painter(),
+                ui.clip_rect(),
+                egui::Shape::galley(egui::Pos2::new(left_panel_x, rect.min.y + 50.0), timer_galley, cyan_accent),
+                center_x,
+            );
+
+            // Draw Section List (ToC)
+            let toc_start_y = rect.min.y + 100.0;
+            let step_y = 24.0;
+            let max_visible_sections = ((height - 180.0) / step_y) as usize;
+
+            for (idx, (name, _)) in self.sections.iter().enumerate().take(max_visible_sections) {
+                let is_active = Some(idx) == active_sec_idx;
+                let color = if is_active { cyan_accent } else { hud_text_color };
+                let prefix = if is_active { "● " } else { "○ " };
+                
+                // Truncate name if it exceeds the margin width safely
+                let max_chars = ((padding - 40.0) / 10.0).max(10.0) as usize;
+                let truncated_name: String = name.chars().take(max_chars).collect();
+                let display_name = format!("{}{}", prefix, truncated_name);
+                
+                let font_sec = if is_active {
+                    egui::FontId::new(13.0, egui::FontFamily::Proportional)
+                } else {
+                    egui::FontId::new(12.0, egui::FontFamily::Proportional)
+                };
+
+                let pos = egui::Pos2::new(left_panel_x, toc_start_y + idx as f32 * step_y);
+                let sec_galley = ui.fonts(|f| f.layout(display_name, font_sec, color, f32::INFINITY));
+                self.paint_shape(ctx, ui.painter(), ui.clip_rect(), egui::Shape::galley(pos, sec_galley, color), center_x);
+            }
+
+            // RIGHT PANEL: Dynamic Pace Estimator & Next Up Preview
+            let right_panel_x = rect.max.x - padding + 25.0;
+            let right_panel_y = rect.min.y + 50.0;
+
+            // 1. Pace Estimator (CPM / WPM)
+            let total_chars = self.text.chars().count();
+            let cpm = if self.max_scroll > 0.0 && total_chars > 0 {
+                let chars_per_pixel = total_chars as f32 / self.max_scroll;
+                let chars_per_sec = self.scroll_speed * chars_per_pixel;
+                (chars_per_sec * 60.0) as i32
+            } else {
+                0
+            };
+            let wpm = cpm / 5;
+            let pace_str = format!("⚡ Pace: {} CPM\n          {} WPM", cpm, wpm);
+            let font_pace = egui::FontId::new(13.0, egui::FontFamily::Proportional);
+            let pace_galley = ui.fonts(|f| f.layout(pace_str, font_pace, hud_text_color, padding - 45.0));
+            self.paint_shape(
+                ctx,
+                ui.painter(),
+                ui.clip_rect(),
+                egui::Shape::galley(egui::Pos2::new(right_panel_x, right_panel_y), pace_galley, hud_text_color),
+                center_x,
+            );
+
+            // 2. Next Up Preview Card
+            if let Some(active_idx) = active_sec_idx {
+                if active_idx + 1 < self.sections.len() {
+                    let next_name = &self.sections[active_idx + 1].0;
+                    
+                    let max_chars = ((padding - 45.0) / 10.0).max(10.0) as usize;
+                    let truncated_next: String = next_name.chars().take(max_chars).collect();
+                    let next_str = format!("⏭  Next Up:\n{}", truncated_next);
+                    
+                    let font_next = egui::FontId::new(13.0, egui::FontFamily::Proportional);
+                    let next_galley = ui.fonts(|f| f.layout(next_str, font_next, cyan_accent, padding - 45.0));
+                    self.paint_shape(
+                        ctx,
+                        ui.painter(),
+                        ui.clip_rect(),
+                        egui::Shape::galley(egui::Pos2::new(right_panel_x, right_panel_y + 60.0), next_galley, cyan_accent),
+                        center_x,
+                    );
+                }
+            }
+        }
+
+        // 5. Draw Scrolling Progress Bar (Cyan thin line at the top)
         if self.max_scroll > 0.0 {
             let progress = (self.scroll_y / self.max_scroll).clamp(0.0, 1.0);
             let progress_width = width * progress;
@@ -767,10 +886,16 @@ impl TeleprompterApp {
                 rect.left_top(),
                 egui::Pos2::new(rect.min.x + progress_width, rect.min.y + 4.0),
             );
-            ui.painter().rect_filled(bar_rect, 0.0, egui::Color32::from_rgb(0, 188, 212));
+            self.paint_shape(
+                ctx,
+                ui.painter(),
+                ui.clip_rect(),
+                egui::Shape::rect_filled(bar_rect, 0.0, egui::Color32::from_rgb(0, 188, 212)),
+                center_x,
+            );
         }
 
-        // 5. Draw Countdown Overlay
+        // 6. Draw Countdown Overlay
         if self.countdown_secs > 0.0 {
             let overlay_bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180);
             let display_number = self.countdown_secs.ceil() as i32;
@@ -802,7 +927,7 @@ impl TeleprompterApp {
                 });
         }
 
-        // 6. Control overlay (disappears after 2s of playing with no actions)
+        // 7. Control overlay (disappears after 2s of playing with no actions)
         let show_overlay = !self.is_playing || Instant::now().duration_since(self.last_action_time).as_secs_f32() < 2.0;
         if show_overlay && self.countdown_secs <= 0.0 {
             let overlay_bg = egui::Color32::from_rgba_unmultiplied(33, 33, 33, 200);
