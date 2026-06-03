@@ -78,13 +78,13 @@ fn configure_dark_theme(ctx: &egui::Context) {
     ctx.set_visuals(visuals);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum AppMode {
     Edit,
     Prompter,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum ColorPreset {
     WhiteOnBlack,
     YellowOnBlack,
@@ -93,17 +93,78 @@ enum ColorPreset {
     BlackOnWhite,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum LanguageFilter {
     All,
     ChineseOnly,
     EnglishOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum UiLanguage {
     Chinese,
     English,
+}
+
+// Configuration persistence structure
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+struct AppConfig {
+    font_size: f32,
+    scroll_speed: f32,
+    line_spacing: f32,
+    text_width_pct: f32,
+    is_mirrored: bool,
+    show_guide: bool,
+    guide_y_pct: f32,
+    show_edge_fade: bool,
+    enable_focus_mode: bool,
+    show_hud: bool,
+    color_preset: ColorPreset,
+    ui_language: UiLanguage,
+    always_on_top: bool,
+    enable_timer_limit: bool,
+    timer_limit_minutes: f32,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            font_size: 48.0,
+            scroll_speed: 60.0,
+            line_spacing: 1.4,
+            text_width_pct: 0.8,
+            is_mirrored: false,
+            show_guide: true,
+            guide_y_pct: 0.33,
+            show_edge_fade: true,
+            enable_focus_mode: true,
+            show_hud: true,
+            color_preset: ColorPreset::WhiteOnBlack,
+            ui_language: UiLanguage::Chinese,
+            always_on_top: false,
+            enable_timer_limit: true,
+            timer_limit_minutes: 4.5,
+        }
+    }
+}
+
+fn load_config() -> AppConfig {
+    let paths = ["config.json", "F:\\rust-teleprompter\\config.json"];
+    for path in paths {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
+                return config;
+            }
+        }
+    }
+    AppConfig::default()
+}
+
+fn save_config(config: &AppConfig) {
+    if let Ok(content) = serde_json::to_string_pretty(config) {
+        let _ = std::fs::write("config.json", &content);
+        let _ = std::fs::write("F:\\rust-teleprompter\\config.json", &content);
+    }
 }
 
 struct TeleprompterApp {
@@ -164,39 +225,42 @@ fn save_text(text: &str) {
 
 impl Default for TeleprompterApp {
     fn default() -> Self {
-        Self {
+        let config = load_config();
+        let mut app = Self {
             text: load_initial_text(),
-            font_size: 48.0,
-            scroll_speed: 60.0,
+            font_size: config.font_size,
+            scroll_speed: config.scroll_speed,
             scroll_y: 0.0,
             is_playing: false,
-            is_mirrored: false,
-            show_guide: true,
-            guide_y_pct: 0.33,
-            color_preset: ColorPreset::WhiteOnBlack,
+            is_mirrored: config.is_mirrored,
+            show_guide: config.show_guide,
+            guide_y_pct: config.guide_y_pct,
+            color_preset: config.color_preset,
             text_color: egui::Color32::WHITE,
             bg_color: egui::Color32::BLACK,
             mode: AppMode::Edit,
             last_update: Instant::now(),
             last_action_time: Instant::now(),
-            text_width_pct: 0.8,
+            text_width_pct: config.text_width_pct,
             countdown_secs: 0.0,
-            show_edge_fade: true,
-            line_spacing: 1.4,
+            show_edge_fade: config.show_edge_fade,
+            line_spacing: config.line_spacing,
             sections: Vec::new(),
             max_scroll: 1000.0,
             language_filter: LanguageFilter::All,
-            enable_focus_mode: true,
+            enable_focus_mode: config.enable_focus_mode,
             elapsed_secs: 0.0,
-            show_hud: true,
+            show_hud: config.show_hud,
             
-            ui_language: UiLanguage::Chinese, // Default to Chinese UI
-            always_on_top: false,
-            prev_always_on_top: false,
-            enable_timer_limit: true,
-            timer_limit_minutes: 4.5, // 4.5 minutes by default matching presentation length
-            remaining_limit_secs: 4.5 * 60.0,
-        }
+            ui_language: config.ui_language,
+            always_on_top: config.always_on_top,
+            prev_always_on_top: config.always_on_top,
+            enable_timer_limit: config.enable_timer_limit,
+            timer_limit_minutes: config.timer_limit_minutes,
+            remaining_limit_secs: config.timer_limit_minutes * 60.0,
+        };
+        app.apply_color_preset();
+        app
     }
 }
 
@@ -237,11 +301,13 @@ impl TeleprompterApp {
                 "timer_limit" => "⏱️ 倒计时限制 (分钟):",
                 "timer_enable" => "启用限时倒计时",
                 "timer_ended" => "⚠️ 时间已到！",
-                 "timer_title" => "计时器",
-                 "ui_lang" => "界面语言 (UI Language):",
-                 _ => "",
-             },
-             UiLanguage::English => match key {
+                "timer_title" => "计时器",
+                "ui_lang" => "界面语言 (UI Language):",
+                "clear_text" => "🗑️ 清空文本",
+                "load_template" => "📋 载入模板",
+                _ => "",
+            },
+            UiLanguage::English => match key {
                 "title" => "🚀 Sisyphus Professional Smart Teleprompter",
                 "start_prompter" => "⚡ Start Prompter (Space)",
                 "settings" => "🎛️ Settings",
@@ -274,10 +340,12 @@ impl TeleprompterApp {
                 "timer_limit" => "⏱️ Time Limit (Minutes):",
                 "timer_enable" => "Enable Limit Countdown",
                 "timer_ended" => "⚠️ TIME'S UP!",
-                 "timer_title" => "Timer",
-                 "ui_lang" => "UI Language:",
-                 _ => "",
-             }
+                "timer_title" => "Timer",
+                "ui_lang" => "UI Language:",
+                "clear_text" => "🗑️ Clear Text",
+                "load_template" => "📋 Load Template",
+                _ => "",
+            }
         }
     }
 
@@ -359,6 +427,27 @@ impl TeleprompterApp {
         } else {
             painter.add(shape);
         }
+    }
+
+    fn save_settings(&self) {
+        let config = AppConfig {
+            font_size: self.font_size,
+            scroll_speed: self.scroll_speed,
+            line_spacing: self.line_spacing,
+            text_width_pct: self.text_width_pct,
+            is_mirrored: self.is_mirrored,
+            show_guide: self.show_guide,
+            guide_y_pct: self.guide_y_pct,
+            show_edge_fade: self.show_edge_fade,
+            enable_focus_mode: self.enable_focus_mode,
+            show_hud: self.show_hud,
+            color_preset: self.color_preset,
+            ui_language: self.ui_language,
+            always_on_top: self.always_on_top,
+            enable_timer_limit: self.enable_timer_limit,
+            timer_limit_minutes: self.timer_limit_minutes,
+        };
+        save_config(&config);
     }
 }
 
@@ -473,6 +562,23 @@ impl TeleprompterApp {
     fn show_edit_ui(&mut self, ui: &mut egui::Ui) {
         // Reset background back to a comfortable UI gray for editing
         ui.style_mut().visuals.override_text_color = None;
+
+        // Take a snapshot of settings before UI actions to check for changes
+        let old_font_size = self.font_size;
+        let old_scroll_speed = self.scroll_speed;
+        let old_line_spacing = self.line_spacing;
+        let old_text_width_pct = self.text_width_pct;
+        let old_is_mirrored = self.is_mirrored;
+        let old_show_guide = self.show_guide;
+        let old_guide_y_pct = self.guide_y_pct;
+        let old_show_edge_fade = self.show_edge_fade;
+        let old_enable_focus_mode = self.enable_focus_mode;
+        let old_show_hud = self.show_hud;
+        let old_color_preset = self.color_preset;
+        let old_ui_language = self.ui_language;
+        let old_always_on_top = self.always_on_top;
+        let old_enable_timer_limit = self.enable_timer_limit;
+        let old_timer_limit_minutes = self.timer_limit_minutes;
 
         // Evaluate all translation keys FIRST to prevent immutable-mutable borrow conflicts on self
         let tr_title = self.tr("title");
@@ -680,9 +786,21 @@ impl TeleprompterApp {
                     });
                 });
 
-                // Column 1: Script Editor (Auto-saves changes)
+                // Column 1: Script Editor (Auto-saves changes, with template/clear buttons)
                 columns[1].vertical(|ui| {
-                    ui.label(tr_editor_title);
+                    ui.horizontal(|ui| {
+                        ui.label(tr_editor_title);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(self.tr("load_template")).clicked() {
+                                self.text = DEFAULT_TEXT.to_string();
+                                save_text(&self.text);
+                            }
+                            if ui.button(self.tr("clear_text")).clicked() {
+                                self.text = String::new();
+                                save_text(&self.text);
+                            }
+                        });
+                    });
                     ui.add_space(5.0);
                     let previous_text = self.text.clone();
                     let text_edit = egui::TextEdit::multiline(&mut self.text)
@@ -698,6 +816,26 @@ impl TeleprompterApp {
                 });
             });
         });
+
+        // Trigger settings persistence if any config value was changed
+        if old_font_size != self.font_size
+            || old_scroll_speed != self.scroll_speed
+            || old_line_spacing != self.line_spacing
+            || old_text_width_pct != self.text_width_pct
+            || old_is_mirrored != self.is_mirrored
+            || old_show_guide != self.show_guide
+            || old_guide_y_pct != self.guide_y_pct
+            || old_show_edge_fade != self.show_edge_fade
+            || old_enable_focus_mode != self.enable_focus_mode
+            || old_show_hud != self.show_hud
+            || old_color_preset != self.color_preset
+            || old_ui_language != self.ui_language
+            || old_always_on_top != self.always_on_top
+            || old_enable_timer_limit != self.enable_timer_limit
+            || old_timer_limit_minutes != self.timer_limit_minutes
+        {
+            self.save_settings();
+        }
     }
 
     fn show_prompter_ui(&mut self, ui: &mut egui::Ui) {
@@ -1053,7 +1191,7 @@ impl TeleprompterApp {
                 self.paint_shape(ctx, ui.painter(), ui.clip_rect(), egui::Shape::galley(pos, sec_galley, color), center_x);
             }
 
-            // RIGHT PANEL: Dynamic Pace Estimator & Next Up Preview
+            // RIGHT PANEL: Dynamic Pace Estimator & Next Up Preview & Real Clock Time
             let right_panel_x = rect.max.x - padding + 25.0;
             let right_panel_y = rect.min.y + 50.0;
 
@@ -1079,6 +1217,7 @@ impl TeleprompterApp {
             );
 
             // 2. Next Up Preview Card
+            let mut preview_height = 0.0;
             if let Some(active_idx) = active_sec_idx {
                 if active_idx + 1 < self.sections.len() {
                     let next_name = &self.sections[active_idx + 1].0;
@@ -1096,8 +1235,21 @@ impl TeleprompterApp {
                         egui::Shape::galley(egui::Pos2::new(right_panel_x, right_panel_y + 60.0), next_galley, cyan_accent),
                         center_x,
                     );
+                    preview_height = 55.0;
                 }
             }
+
+            // 3. Real local clock time (v1.0.7)
+            let clock_str = format!("🕒  {}", chrono::Local::now().format("%H:%M:%S"));
+            let font_clock = egui::FontId::new(13.0, egui::FontFamily::Proportional);
+            let clock_galley = ui.fonts(|f| f.layout(clock_str, font_clock, hud_text_color, padding - 45.0));
+            self.paint_shape(
+                ctx,
+                ui.painter(),
+                ui.clip_rect(),
+                egui::Shape::galley(egui::Pos2::new(right_panel_x, right_panel_y + 60.0 + preview_height + 25.0), clock_galley, hud_text_color),
+                center_x,
+            );
         }
 
         // 5. Draw Scrolling Progress Bar (Cyan thin line at the top)
@@ -1225,7 +1377,7 @@ Beyond agile hardware development, my second core achievement is the **full-stac
 
 === PAGE 3: Achievement 3: Systems Engineering & Commercialization ===
 [中文]
-请翻到第3页。我的第三个核心成果是大型系统的商业化运营。作为科技初创企业‘云影智巡’的CTO，我全面领导了机器人技术（包括教育无人机 and 仿生扑翼微型飞行器）的全栈研发。
+请翻到第3页。我的第三个核心成果是大型系统的商业化运营。作为科技初创企业‘云影智巡’的CTO，我全面领导了机器人技术（包括教育无人机和仿生扑翼微型飞行器）的全栈研发。
 
 图4在左侧展示了我们多代仿生扑翼无人机硬核的迭代过程。图5在右侧梳理了支持该产品矩阵的跨学科技术栈。基于ArduPilot和PX4等底层架构，我们成功攻克了罗盘校准和复杂PID调参等工程难题。
 
@@ -1249,7 +1401,7 @@ To build technical barriers, as shown in Fig. 8 in the middle, I accumulated **o
 [中文]
 工程痛点反向驱动了我对学术界的深耕。请看包含我第四个成果的第5页。
 
-左下角的图12是我在JCR Q1区期刊《Biomimetics》上发表的仿生无人机空间连杆机构研究，在此项研究中，我们克服了复杂湍流下的控制难题。右下角的图13是发表在自动驾驶顶级期刊《IEEE TVT》上的预测局部多重注意力（PLMA）模型。作为第二作者，我独立设计了核心进化网络拓扑，并在真实数据集上完成了高精度的风险评估验证。
+left_bottom的图12是我在JCR Q1区期刊《Biomimetics》上发表的仿生无人机空间连杆机构研究，在此项研究中，我们克服了复杂湍流下的控制难题。右下角的图13是发表在自动驾驶顶级期刊《IEEE TVT》上的预测局部多重注意力（PLMA）模型。作为第二作者，我独立设计了核心进化网络拓扑，并在真实数据集上完成了高精度的风险评估验证。
 
 [English]
 Engineering pain points have inversely driven my deep dive into academia. Please look at PAGE 5, covering my fourth achievement.
