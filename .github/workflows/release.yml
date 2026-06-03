@@ -19,9 +19,22 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin, aarch64-apple-darwin
 
-      - name: Build Binary
-        run: cargo build --release
+      - name: Build Binary (Intel x86_64)
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Build Binary (Apple Silicon aarch64)
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Combine into Universal Binary
+        run: |
+          mkdir -p target/release
+          lipo -create \
+            -output target/release/rust-teleprompter \
+            target/x86_64-apple-darwin/release/rust-teleprompter \
+            target/aarch64-apple-darwin/release/rust-teleprompter
 
       - name: Package macOS App Bundle
         run: |
@@ -41,9 +54,9 @@ jobs:
               <key>CFBundleName</key>
               <string>Sisyphus Teleprompter</string>
               <key>CFBundleVersion</key>
-              <string>1.0.0</string>
+              <string>1.0.1</string>
               <key>CFBundleShortVersionString</key>
-              <string>1.0.0</string>
+              <string>1.0.1</string>
               <key>CFBundlePackageType</key>
               <string>APPL</string>
               <key>LSMinimumSystemVersion</key>
