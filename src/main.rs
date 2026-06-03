@@ -109,16 +109,38 @@ struct TeleprompterApp {
     last_update: Instant,
     last_action_time: Instant, // For auto-hiding prompt info
     
-    // Optimizations:
+    // Upgrades:
     text_width_pct: f32, // Margins / width control (0.4 to 0.95 of screen)
     countdown_secs: f32, // Preparation countdown (e.g. 3.0s)
     show_edge_fade: bool, // Top and bottom gradient fades
+    line_spacing: f32, // Line height multiplier (1.0 to 2.5)
+    sections: Vec<(String, f32)>, // Store header names and their scroll Y offsets
+    max_scroll: f32, // Store dynamically calculated max scroll limit
+}
+
+fn load_initial_text() -> String {
+    if let Ok(content) = std::fs::read_to_string("script.txt") {
+        if !content.trim().is_empty() {
+            return content;
+        }
+    }
+    if let Ok(content) = std::fs::read_to_string("F:\\rust-teleprompter\\script.txt") {
+        if !content.trim().is_empty() {
+            return content;
+        }
+    }
+    DEFAULT_TEXT.to_string()
+}
+
+fn save_text(text: &str) {
+    let _ = std::fs::write("script.txt", text);
+    let _ = std::fs::write("F:\\rust-teleprompter\\script.txt", text);
 }
 
 impl Default for TeleprompterApp {
     fn default() -> Self {
         Self {
-            text: DEFAULT_TEXT.to_string(),
+            text: load_initial_text(),
             font_size: 48.0,
             scroll_speed: 60.0,
             scroll_y: 0.0,
@@ -135,6 +157,9 @@ impl Default for TeleprompterApp {
             text_width_pct: 0.8,
             countdown_secs: 0.0,
             show_edge_fade: true,
+            line_spacing: 1.4,
+            sections: Vec::new(),
+            max_scroll: 1000.0,
         }
     }
 }
@@ -191,6 +216,13 @@ impl TeleprompterApp {
         
         painter.add(egui::Shape::mesh(mesh));
     }
+
+    fn jump_to_section(&mut self, idx: usize) {
+        if idx < self.sections.len() {
+            self.scroll_y = self.sections[idx].1;
+            self.record_action();
+        }
+    }
 }
 
 impl eframe::App for TeleprompterApp {
@@ -208,7 +240,10 @@ impl eframe::App for TeleprompterApp {
                 }
                 ctx.request_repaint();
             } else if self.is_playing {
-                self.scroll_y += self.scroll_speed * dt;
+                self.scroll_y = (self.scroll_y + self.scroll_speed * dt).min(self.max_scroll);
+                if self.scroll_y >= self.max_scroll {
+                    self.is_playing = false;
+                }
                 ctx.request_repaint();
             }
         }
@@ -275,6 +310,12 @@ impl TeleprompterApp {
                         ui.add_space(6.0);
 
                         ui.horizontal(|ui| {
+                            ui.label("Line Height / Spacing:");
+                            ui.add(egui::Slider::new(&mut self.line_spacing, 1.0..=2.5).suffix(" x"));
+                        });
+                        ui.add_space(6.0);
+
+                        ui.horizontal(|ui| {
                             ui.label("Text Column Width:");
                             ui.add(egui::Slider::new(&mut self.text_width_pct, 0.4..=0.95).text("Width %"));
                         });
@@ -327,6 +368,7 @@ impl TeleprompterApp {
                         ui.label("• Up / Down Arrow: Speed up / slow down (+/- 5)");
                         ui.label("• Left / Right Arrow: Scroll backward / forward");
                         ui.label("• Mouse Wheel: Scroll manually (paused) / adjust speed (playing)");
+                        ui.label("• Keys 1-9: Jump directly to mapped Page Sections!");
                         ui.label("• R Key: Reset scroll to top");
                         ui.label("• M Key: Toggle Mirroring");
                         ui.label("• G Key: Toggle Guide line");
@@ -334,10 +376,11 @@ impl TeleprompterApp {
                     });
                 });
 
-                // Column 1: Script Editor
+                // Column 1: Script Editor (Auto-saves changes)
                 columns[1].vertical(|ui| {
-                    ui.label("📝 Enter Presentation Script:");
+                    ui.label("📝 Enter Presentation Script (Autosaved):");
                     ui.add_space(5.0);
+                    let previous_text = self.text.clone();
                     let text_edit = egui::TextEdit::multiline(&mut self.text)
                         .font(egui::TextStyle::Monospace)
                         .desired_width(ui.available_width())
@@ -345,6 +388,9 @@ impl TeleprompterApp {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.add(text_edit);
                     });
+                    if self.text != previous_text {
+                        save_text(&self.text);
+                    }
                 });
             });
         });
@@ -391,7 +437,7 @@ impl TeleprompterApp {
             ctx.request_repaint();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::PageDown)) {
-            self.scroll_y += 150.0;
+            self.scroll_y = (self.scroll_y + 150.0).min(self.max_scroll);
             self.record_action();
             ctx.request_repaint();
         }
@@ -411,6 +457,17 @@ impl TeleprompterApp {
             self.record_action();
         }
 
+        // Quick Jumps (Keys 1-9)
+        if ctx.input(|i| i.key_pressed(egui::Key::Num1)) { self.jump_to_section(0); }
+        if ctx.input(|i| i.key_pressed(egui::Key::Num2)) { self.jump_to_section(1); }
+        if ctx.input(|i| i.key_pressed(egui::Key::Num3)) { self.jump_to_section(2); }
+        if ctx.input(|i| i.key_pressed(egui::Key::Num4)) { self.jump_to_section(3); }
+        if ctx.input(|i| i.key_pressed(egui::Key::Num5)) { self.jump_to_section(4); }
+        if ctx.input(|i| i.key_pressed(egui::Key::Num6)) { self.jump_to_section(5); }
+        if ctx.input(|i| i.key_pressed(egui::Key::Num7)) { self.jump_to_section(6); }
+        if ctx.input(|i| i.key_pressed(egui::Key::Num8)) { self.jump_to_section(7); }
+        if ctx.input(|i| i.key_pressed(egui::Key::Num9)) { self.jump_to_section(8); }
+
         // Mouse Wheel interaction
         let scroll_delta = ctx.input(|i| i.smooth_scroll_delta);
         if scroll_delta.y != 0.0 {
@@ -419,59 +476,91 @@ impl TeleprompterApp {
                 self.scroll_speed = (self.scroll_speed + scroll_delta.y * 0.5).clamp(5.0, 500.0);
             } else if self.countdown_secs <= 0.0 {
                 // Scroll text manually when paused
-                self.scroll_y = (self.scroll_y - scroll_delta.y * 1.5).max(0.0);
+                self.scroll_y = (self.scroll_y - scroll_delta.y * 1.5).clamp(0.0, self.max_scroll);
             }
             self.record_action();
             ctx.request_repaint();
         }
 
-        // 1. Text wrapping & layout
-        let font_id = egui::FontId::new(self.font_size, egui::FontFamily::Proportional);
-        // Calculate dynamic padding based on text width slider
+        // Calculate layout properties
         let text_area_width = width * self.text_width_pct;
         let padding = (width - text_area_width) / 2.0;
         let wrapping_width = text_area_width;
-        
-        let galley = ui.fonts(|f| f.layout(self.text.clone(), font_id, self.text_color, wrapping_width));
-        let galley_height = galley.rect.height();
 
         // Reading line Y position
         let guide_y = height * self.guide_y_pct;
         let start_y = guide_y;
 
-        // Position Y calculation
-        let draw_y = start_y - self.scroll_y;
+        // Paragraph-based custom layout loop with syntax highlighting and jump section calculations
+        let mut current_y = 0.0;
+        let mut temp_sections = Vec::new();
 
-        // Keep scroll within logical bounds
-        let max_scroll = galley_height + 200.0;
-        if self.scroll_y > max_scroll {
-            self.scroll_y = max_scroll;
-            self.is_playing = false;
-        }
-
-        // Draw the text
-        let text_pos = egui::Pos2::new(rect.min.x + padding, rect.min.y + draw_y);
-        let shape = egui::Shape::galley(text_pos, galley, self.text_color);
-
-        if self.is_mirrored {
-            // Apply horizontal vertex-level mirror across the window's middle X
-            let center_x = rect.center().x;
-            let clipped_shape = egui::epaint::ClippedShape {
-                clip_rect: ui.clip_rect(),
-                shape,
+        for line in self.text.lines() {
+            let is_header = line.trim().starts_with("===");
+            let is_meta = line.trim().starts_with("[") || line.trim().starts_with("【");
+            
+            let (font, color, extra_space) = if is_header {
+                let clean_name = line.replace("===", "").trim().to_string();
+                temp_sections.push((clean_name, current_y));
+                (
+                    egui::FontId::new(self.font_size * 1.05, egui::FontFamily::Proportional),
+                    egui::Color32::from_rgb(0, 188, 212), // Vibrant Cyan for headers
+                    self.font_size * 0.8
+                )
+            } else if is_meta {
+                (
+                    egui::FontId::new(self.font_size * 0.8, egui::FontFamily::Proportional),
+                    egui::Color32::from_rgb(120, 144, 156), // Muted blue-grey for markers
+                    self.font_size * 0.2
+                )
+            } else {
+                (
+                    egui::FontId::new(self.font_size, egui::FontFamily::Proportional),
+                    self.text_color,
+                    0.0
+                )
             };
-            let primitives = ctx.tessellate(vec![clipped_shape], ctx.pixels_per_point());
-            for primitive in primitives {
-                if let egui::epaint::Primitive::Mesh(mut mesh) = primitive.primitive {
-                    for vertex in &mut mesh.vertices {
-                        vertex.pos.x = center_x - (vertex.pos.x - center_x);
+
+            // Layout the line/paragraph using the correct font
+            let galley = ui.fonts(|f| f.layout(line.to_string(), font, color, wrapping_width));
+            let galley_height = galley.rect.height();
+
+            // Calculate precise Y drawing position relative to the scroll state
+            let draw_pos_y = start_y + current_y - self.scroll_y;
+
+            // Frustum Culling: Draw only if the text is physically visible on the screen
+            if draw_pos_y + galley_height > 0.0 && draw_pos_y < height {
+                let text_pos = egui::Pos2::new(rect.min.x + padding, rect.min.y + draw_pos_y);
+                let shape = egui::Shape::galley(text_pos, galley, color);
+
+                if self.is_mirrored {
+                    // Mirror shape mesh horizontally
+                    let center_x = rect.center().x;
+                    let clipped_shape = egui::epaint::ClippedShape {
+                        clip_rect: ui.clip_rect(),
+                        shape,
+                    };
+                    let primitives = ctx.tessellate(vec![clipped_shape], ctx.pixels_per_point());
+                    for primitive in primitives {
+                        if let egui::epaint::Primitive::Mesh(mut mesh) = primitive.primitive {
+                            for vertex in &mut mesh.vertices {
+                                vertex.pos.x = center_x - (vertex.pos.x - center_x);
+                            }
+                            ui.painter().add(egui::Shape::mesh(mesh));
+                        }
                     }
-                    ui.painter().add(egui::Shape::mesh(mesh));
+                } else {
+                    ui.painter().add(shape);
                 }
             }
-        } else {
-            ui.painter().add(shape);
+
+            // Increment scroll offsets
+            current_y += (galley_height * self.line_spacing) + extra_space;
         }
+
+        // Cache calculated offsets
+        self.sections = temp_sections;
+        self.max_scroll = current_y;
 
         // 2. Draw Reading Guide Line (semitransparent horizontal guide)
         if self.show_guide {
@@ -533,7 +622,18 @@ impl TeleprompterApp {
             self.draw_fade_gradient(ui.painter(), bottom_rect, self.bg_color, false);
         }
 
-        // 4. Draw Countdown Overlay
+        // 4. Draw Scrolling Progress Bar (Cyan thin line at the top)
+        if self.max_scroll > 0.0 {
+            let progress = self.scroll_y / self.max_scroll;
+            let progress_width = width * progress;
+            let bar_rect = egui::Rect::from_min_max(
+                rect.left_top(),
+                egui::Pos2::new(rect.min.x + progress_width, rect.min.y + 4.0),
+            );
+            ui.painter().rect_filled(bar_rect, 0.0, egui::Color32::from_rgb(0, 188, 212));
+        }
+
+        // 5. Draw Countdown Overlay
         if self.countdown_secs > 0.0 {
             let overlay_bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180);
             let display_number = self.countdown_secs.ceil() as i32;
@@ -565,7 +665,7 @@ impl TeleprompterApp {
                 });
         }
 
-        // 5. Control overlay (disappears after 2s of playing with no actions)
+        // 6. Control overlay (disappears after 2s of playing with no actions)
         let show_overlay = !self.is_playing || Instant::now().duration_since(self.last_action_time).as_secs_f32() < 2.0;
         if show_overlay && self.countdown_secs <= 0.0 {
             let overlay_bg = egui::Color32::from_rgba_unmultiplied(33, 33, 33, 200);
@@ -613,7 +713,7 @@ My first core achievement lies in hardware product definition. During the InnoX 
 
 更令人兴奋的是，该项目目前正加速迈向深度商业化。我们团队最近迎来了两位实力强劲的新伙伴，目前正全力进军国际市场流量。我们正积极建立海外种子用户社区，并筹备在Kickstarter上发起众筹活动。这一从产品定义、Demo实现到全球化拓展的完整历程，使我荣获了‘优秀产品经理’称号。
 
-除了敏捷硬件开发，我的第二个核心成果是前线工业级AI的全栈部署。请看中间的图3；这是我构建 of 工业AI Agent决策流架构。面对复杂、非标的SMT车间，我开发了一套高效的视频处理管线，清洗了1289个异常视频片段，作为视觉大模型（VLM）微调的基础。基于LangGraph状态机和ReAct逻辑，该闭环系统现已部署于实际生产线，展现出替代约30%重度人工视觉检测岗位的巨大潜力。
+除了敏捷硬件开发，我的第二个核心成果是前线工业级AI的全栈部署。请看中间的图3；这是我构建的工业AI Agent决策流架构。面对复杂、非标的SMT车间，我开发了一套高效的视频处理管线，清洗了1289个异常视频片段，作为视觉大模型（VLM）微调的基础。基于LangGraph状态机 and ReAct逻辑，该闭环系统现已部署于实际生产线，展现出替代约30%重度人工视觉检测岗位的巨大潜力。
 
 [English]
 Please turn to PAGE 2. In the product implementation phase, as shown in Fig. 2 at the top, through continuous, high-intensity MVP rapid iterations, we have successfully polished a highly refined product Demo.
