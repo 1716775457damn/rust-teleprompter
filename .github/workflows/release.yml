@@ -1,0 +1,94 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build macOS DMG
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Binary
+        run: cargo build --release
+
+      - name: Package macOS App Bundle
+        run: |
+          mkdir -p "Sisyphus_Teleprompter.app/Contents/MacOS"
+          mkdir -p "Sisyphus_Teleprompter.app/Contents/Resources"
+          cp target/release/rust-teleprompter "Sisyphus_Teleprompter.app/Contents/MacOS/Sisyphus_Teleprompter"
+          
+          cat <<EOF > "Sisyphus_Teleprompter.app/Contents/Info.plist"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>Sisyphus_Teleprompter</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.sisyphus.teleprompter</string>
+              <key>CFBundleName</key>
+              <string>Sisyphus Teleprompter</string>
+              <key>CFBundleVersion</key>
+              <string>1.0.0</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0.0</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>10.15</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Create DMG Disk Image
+        run: |
+          mkdir staging
+          mv Sisyphus_Teleprompter.app staging/
+          ln -s /Applications staging/Applications
+          hdiutil create -fs HFS+ -srcfolder staging -volname "Sisyphus Teleprompter" "Sisyphus_Teleprompter_macOS.dmg"
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Sisyphus_Teleprompter_macOS.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-windows:
+    name: Build Windows Executable
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Binary
+        run: cargo build --release
+
+      - name: Package Windows ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/release/rust-teleprompter.exe -DestinationPath Sisyphus_Teleprompter_Windows.zip
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Sisyphus_Teleprompter_Windows.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
