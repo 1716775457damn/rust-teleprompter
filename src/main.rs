@@ -107,6 +107,30 @@ enum UiLanguage {
     English,
 }
 
+// Text Alignment Enum (v1.1.2)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum TextAlignment {
+    Left,
+    Center,
+    Right,
+}
+
+impl Default for TextAlignment {
+    fn default() -> Self {
+        TextAlignment::Left
+    }
+}
+
+impl TextAlignment {
+    fn to_egui_align(self) -> egui::Align {
+        match self {
+            TextAlignment::Left => egui::Align::Min,
+            TextAlignment::Center => egui::Align::Center,
+            TextAlignment::Right => egui::Align::Max,
+        }
+    }
+}
+
 // Section structure mapping containing parsed tags
 #[derive(Debug, Clone)]
 struct SectionInfo {
@@ -139,7 +163,12 @@ struct AppConfig {
     countdown_duration_secs: f32,
     enable_slide_alerts: bool,
     #[serde(default)]
-    transparent_background: bool, // Pure transparent background (v1.1.1)
+    transparent_background: bool,
+    // Upgrades (v1.1.2):
+    #[serde(default)]
+    mouse_passthrough: bool, // Allow clicking through the prompter window
+    #[serde(default)]
+    text_align: TextAlignment, // Custom script alignment
 }
 
 impl Default for AppConfig {
@@ -165,6 +194,8 @@ impl Default for AppConfig {
             countdown_duration_secs: 3.0,
             enable_slide_alerts: true,
             transparent_background: false,
+            mouse_passthrough: false,
+            text_align: TextAlignment::Left,
         }
     }
 }
@@ -241,6 +272,11 @@ struct TeleprompterApp {
 
     // Iteration Upgrades (v1.1.1):
     transparent_background: bool, // Toggle completely transparent overlay mode
+
+    // Iteration Upgrades (v1.1.2):
+    mouse_passthrough: bool, // Toggle click-through ghost mode
+    prev_mouse_passthrough: bool,
+    text_align: TextAlignment, // Text alignment selector
 }
 
 fn load_initial_text() -> String {
@@ -310,6 +346,10 @@ impl Default for TeleprompterApp {
             enable_slide_alerts: config.enable_slide_alerts,
             active_slide_alert: None,
             transparent_background: config.transparent_background,
+
+            mouse_passthrough: config.mouse_passthrough,
+            prev_mouse_passthrough: config.mouse_passthrough,
+            text_align: config.text_align,
         };
         app.apply_color_preset();
         app
@@ -369,9 +409,15 @@ impl TeleprompterApp {
                 "stats_chars" => "• 字符数(含标点):",
                 "stats_words" => "• 英文单词数:",
                 "stats_time" => "• 预计阅读时长(按当前速度):",
-                
-                // v1.1.1 keys:
                 "transparent_background" => "👻 开启背景完全透明 (仅文字可见)",
+                
+                // v1.1.2 keys:
+                "mouse_passthrough" => "👻 开启鼠标穿透 (忽略点击，可操作底层软件)",
+                "text_align" => "文字对齐方式 (Alignment):",
+                "align_left" => "左对齐",
+                "align_center" => "居中对齐",
+                "align_right" => "右对齐",
+                "sc_passthrough_tip" => "💡 提示：开启鼠标穿透后，您可直接点击底层的PPT。如需退出，请在任务栏中点击本软件重新激活，再按 Esc 退出。",
                 _ => "",
             },
             UiLanguage::English => match key {
@@ -423,9 +469,15 @@ impl TeleprompterApp {
                 "stats_chars" => "• Total Characters:",
                 "stats_words" => "• English Word Count:",
                 "stats_time" => "• Est. Reading Time (at current speed):",
-                
-                // v1.1.1 keys:
                 "transparent_background" => "👻 Pure Transparent Background (Text Only)",
+                
+                // v1.1.2 keys:
+                "mouse_passthrough" => "👻 Enable Mouse Passthrough (Ignore clicks for overlay)",
+                "text_align" => "Text Alignment:",
+                "align_left" => "Left",
+                "align_center" => "Center",
+                "align_right" => "Right",
+                "sc_passthrough_tip" => "💡 Note: When Passthrough is ON, click underlying apps. To exit, click this app's taskbar icon to refocus, then press Esc.",
                 _ => "",
             }
         }
@@ -533,6 +585,8 @@ impl TeleprompterApp {
             countdown_duration_secs: self.countdown_duration_secs,
             enable_slide_alerts: self.enable_slide_alerts,
             transparent_background: self.transparent_background,
+            mouse_passthrough: self.mouse_passthrough,
+            text_align: self.text_align,
         };
         save_config(&config);
     }
@@ -556,9 +610,11 @@ fn parse_formatted_line(
     wrapping_width: f32,
     is_header: bool,
     is_meta: bool,
+    align: egui::Align, // Pass text alignment
 ) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = wrapping_width;
+    job.halign = align; // Apply alignment
     
     let final_font_size = if is_header {
         font_size * 1.1
@@ -619,6 +675,13 @@ impl eframe::App for TeleprompterApp {
         if self.fullscreen != self.prev_fullscreen {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
             self.prev_fullscreen = self.fullscreen;
+        }
+
+        // Mouse Passthrough / Ghost Mode command dispatcher (v1.1.2)
+        let should_passthrough = self.mode == AppMode::Prompter && self.mouse_passthrough;
+        if should_passthrough != self.prev_mouse_passthrough {
+            ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(should_passthrough));
+            self.prev_mouse_passthrough = should_passthrough;
         }
 
         // Auto-scrolling in Prompter mode (with countdown pause)
@@ -706,6 +769,8 @@ impl TeleprompterApp {
         let old_countdown_duration_secs = self.countdown_duration_secs;
         let old_enable_slide_alerts = self.enable_slide_alerts;
         let old_transparent_background = self.transparent_background;
+        let old_mouse_passthrough = self.mouse_passthrough;
+        let old_text_align = self.text_align;
 
         // Evaluate all translation keys FIRST to prevent immutable-mutable borrow conflicts on self
         let tr_title = self.tr("title");
@@ -742,7 +807,7 @@ impl TeleprompterApp {
         let sc_m = self.tr("sc_m");
         let sc_g = self.tr("sc_g");
 
-        // v1.0.8, v1.0.9, v1.1.0 & v1.1.1 translations
+        // v1.0.8 to v1.1.2 translations
         let tr_target_duration = self.tr("target_duration");
         let tr_calibrate_btn = self.tr("calibrate_btn");
         let tr_fullscreen_hint = self.tr("fullscreen_hint");
@@ -754,6 +819,11 @@ impl TeleprompterApp {
         let tr_stats_words = self.tr("stats_words");
         let tr_stats_time = self.tr("stats_time");
         let tr_transparent_background = self.tr("transparent_background");
+        let tr_mouse_passthrough = self.tr("mouse_passthrough");
+        let tr_text_align = self.tr("text_align");
+        let tr_align_left = self.tr("align_left");
+        let tr_align_center = self.tr("align_center");
+        let tr_align_right = self.tr("align_right");
 
         // Calculate Text Statistics
         let char_count = self.text.chars().count();
@@ -813,7 +883,11 @@ impl TeleprompterApp {
                         ui.checkbox(&mut self.always_on_top, tr_always_on_top);
                         ui.add_space(6.0);
 
-                        // Pure Transparent Background checkbox (v1.1.1)
+                        // Mouse passthrough click-through toggle (v1.1.2)
+                        ui.checkbox(&mut self.mouse_passthrough, tr_mouse_passthrough);
+                        ui.add_space(6.0);
+
+                        // Pure Transparent Background checkbox
                         ui.checkbox(&mut self.transparent_background, tr_transparent_background);
                         ui.add_space(6.0);
 
@@ -825,6 +899,18 @@ impl TeleprompterApp {
                             });
                             ui.add_space(6.0);
                         }
+
+                        // Text Alignment Selector (v1.1.2)
+                        ui.horizontal(|ui| {
+                            ui.label(tr_text_align);
+                            ui.selectable_value(&mut self.text_align, TextAlignment::Left, tr_align_left);
+                            ui.selectable_value(&mut self.text_align, TextAlignment::Center, tr_align_center);
+                            ui.selectable_value(&mut self.text_align, TextAlignment::Right, tr_align_right);
+                        });
+                        ui.add_space(8.0);
+
+                        ui.separator();
+                        ui.add_space(8.0);
 
                         // Countdown duration adjust
                         ui.horizontal(|ui| {
@@ -1042,6 +1128,8 @@ impl TeleprompterApp {
             || old_countdown_duration_secs != self.countdown_duration_secs
             || old_enable_slide_alerts != self.enable_slide_alerts
             || old_transparent_background != self.transparent_background
+            || old_mouse_passthrough != self.mouse_passthrough
+            || old_text_align != self.text_align
         {
             self.save_settings();
         }
@@ -1263,7 +1351,7 @@ impl TeleprompterApp {
                 continue;
             }
 
-            // Layout the line/paragraph using the correct format and bold parser
+            // Layout the line/paragraph using the correct format, bold parser, and alignment (v1.1.2)
             let mut job = parse_formatted_line(
                 trimmed,
                 self.font_size,
@@ -1272,6 +1360,7 @@ impl TeleprompterApp {
                 wrapping_width,
                 is_header,
                 is_meta,
+                self.text_align.to_egui_align(),
             );
             
             let galley = ui.fonts(|f| f.layout_job(job.clone()));
@@ -1390,7 +1479,7 @@ impl TeleprompterApp {
                 egui::Pos2::new(rect.min.x, rect.max.y - fade_height),
                 rect.right_bottom(),
             );
-            self.draw_fade_gradient(ui.painter(), bottom_rect, fade_color, false);
+            self.draw_fade_gradient(ui.painter(), bottom_rect, self.bg_color, false);
         }
 
         // 4. Draw Presenter Guide HUD (Left/Right panels in margins)
@@ -1553,6 +1642,7 @@ impl TeleprompterApp {
                         width - 300.0,
                         false,
                         false,
+                        egui::Align::Center,
                     );
                     let cue_galley = ui.fonts(|f| f.layout_job(job));
                     let cue_width = cue_galley.rect.width();
@@ -1673,7 +1763,7 @@ impl TeleprompterApp {
                 });
         }
 
-        // 7. Control overlay (disappears after 2s of playing with no actions)
+        // 7. Control overlay (disappears after 2s of playing with no actions, showing mouse passthrough tip if active)
         let show_overlay = !self.is_playing || Instant::now().duration_since(self.last_action_time).as_secs_f32() < 2.0;
         if show_overlay && self.countdown_secs <= 0.0 {
             let overlay_bg = egui::Color32::from_rgba_unmultiplied(33, 33, 33, 200);
@@ -1698,22 +1788,30 @@ impl TeleprompterApp {
                         .rounding(4.0)
                         .show(ui, |ui| {
                             ui.style_mut().visuals.override_text_color = Some(text_color);
-                            ui.horizontal(|ui| {
-                                let state_str = if self.is_playing { "▶ PLAYING" } else { "⏸ PAUSED" };
-                                let lang_str = match self.language_filter {
-                                    LanguageFilter::All => "All",
-                                    LanguageFilter::ChineseOnly => "CN Only",
-                                    LanguageFilter::EnglishOnly => "EN Only",
-                                };
-                                ui.label(format!(
-                                    "[{}] Rem: {} | Speed: {:.0} px/s | Width: {:.0}% | Lang: {} | Focus: {} | ESC: Exit",
-                                    state_str,
-                                    remaining_time_str,
-                                    self.scroll_speed,
-                                    self.text_width_pct * 100.0,
-                                    lang_str,
-                                    if self.enable_focus_mode { "ON" } else { "OFF" }
-                                ));
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    let state_str = if self.is_playing { "▶ PLAYING" } else { "⏸ PAUSED" };
+                                    let lang_str = match self.language_filter {
+                                        LanguageFilter::All => "All",
+                                        LanguageFilter::ChineseOnly => "CN Only",
+                                        LanguageFilter::EnglishOnly => "EN Only",
+                                    };
+                                    ui.label(format!(
+                                        "[{}] Rem: {} | Speed: {:.0} px/s | Width: {:.0}% | Lang: {} | Focus: {} | ESC: Exit",
+                                        state_str,
+                                        remaining_time_str,
+                                        self.scroll_speed,
+                                        self.text_width_pct * 100.0,
+                                        lang_str,
+                                        if self.enable_focus_mode { "ON" } else { "OFF" }
+                                    ));
+                                });
+                                // Display helper tip when mouse click-through is enabled (v1.1.2)
+                                if self.mouse_passthrough {
+                                    ui.add_space(4.0);
+                                    let tr_tip = self.tr("sc_passthrough_tip");
+                                    ui.label(egui::RichText::new(tr_tip).size(11.0).color(egui::Color32::from_rgb(0, 188, 212)));
+                                }
                             });
                         });
                 });
@@ -1728,7 +1826,7 @@ const DEFAULT_TEXT: &str = r#"=== PAGE 1: Opening & Hardware Product Definition 
 [中文]
 各位评委老师，早上好。我是陶鑫旺。正如我作品集第一页所示，我将自己定位为**机器人系统研发工程师**与**工业AI全栈实践者**。我始终致力于打破代码与物理世界之间的边界。
 
-我的第一个核心成果在于**硬件产品定义**。在李泽湘教授指导的InnoX创业营期间——您可以在图1中看到我们的路演合影——我主导了智能硬件Lumina从0到1的开发。针对年轻人因高功能焦虑引起的‘决策瘫痪’，我们创新地设计了**‘配重转子动态阻尼扭矩反馈’**的物理机制，将心理学机制具象化地实现在物理世界中。
+我的第一个核心成果在于**硬件产品定义**。在李泽湘教授指导的InnoX创业营期间——您可以在图1中看到我们的路演合影——我主导了智能硬件Lumina从0到1 of 开发。针对年轻人因高功能焦虑引起的‘决策瘫痪’，我们创新地设计了**‘配重转子动态阻尼扭矩反馈’**的物理机制，将心理学机制具象化地实现在物理世界中。
 
 [English]
 Good morning, respected judges. I am Xinwang Tao. As shown on the first page of my portfolio, I position myself as a **Robotics System R&D Engineer** and an **Industrial AI Full-Stack Practitioner**. I am always driven to break the boundaries between code and the physical world.
