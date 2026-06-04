@@ -6,7 +6,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Sisyphus Professional Rust Teleprompter")
-            .with_inner_size([1024.0, 768.0]),
+            .with_inner_size([1024.0, 768.0])
+            .with_transparent(true), // Enable OS transparent window capabilities
         ..Default::default()
     };
     eframe::run_native(
@@ -106,6 +107,15 @@ enum UiLanguage {
     English,
 }
 
+// Section structure mapping containing parsed tags
+#[derive(Debug, Clone)]
+struct SectionInfo {
+    name: String,
+    offset_y: f32,
+    speed: Option<f32>,
+    cues: Vec<String>,
+}
+
 // Configuration persistence structure
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct AppConfig {
@@ -125,6 +135,7 @@ struct AppConfig {
     enable_timer_limit: bool,
     timer_limit_minutes: f32,
     target_duration_minutes: f32,
+    window_opacity: f32,
 }
 
 impl Default for AppConfig {
@@ -145,7 +156,8 @@ impl Default for AppConfig {
             always_on_top: false,
             enable_timer_limit: true,
             timer_limit_minutes: 4.5,
-            target_duration_minutes: 4.5, // 4.5 minutes default (270 seconds)
+            target_duration_minutes: 4.5,
+            window_opacity: 1.0,
         }
     }
 }
@@ -188,7 +200,7 @@ struct TeleprompterApp {
     countdown_secs: f32, // Preparation countdown (e.g. 3.0s)
     show_edge_fade: bool, // Top and bottom gradient fades
     line_spacing: f32, // Line height multiplier (1.0 to 2.5)
-    sections: Vec<(String, f32)>, // Store header names and their scroll Y offsets
+    sections: Vec<SectionInfo>, // Struct containing header, Y offset, parsed speed, and cues
     max_scroll: f32, // Store dynamically calculated max scroll limit
     language_filter: LanguageFilter,
     enable_focus_mode: bool, // Dim unread text blocks to enhance focus
@@ -210,6 +222,10 @@ struct TeleprompterApp {
     target_scroll_y: f32, // Dampened target Y coordinate for smooth scrolling
     fullscreen: bool,
     prev_fullscreen: bool,
+
+    // Iteration Upgrades (v1.0.9):
+    window_opacity: f32, // Glass/overlay transparency (0.1 to 1.0)
+    last_active_sec_idx: Option<usize>, // Track transition between sections to trigger autocompleted events
 }
 
 fn load_initial_text() -> String {
@@ -271,6 +287,9 @@ impl Default for TeleprompterApp {
             target_scroll_y: 0.0,
             fullscreen: false,
             prev_fullscreen: false,
+
+            window_opacity: config.window_opacity,
+            last_active_sec_idx: None,
         };
         app.apply_color_preset();
         app
@@ -318,11 +337,13 @@ impl TeleprompterApp {
                 "ui_lang" => "界面语言 (UI Language):",
                 "clear_text" => "🗑️ 清空文本",
                 "load_template" => "📋 载入模板",
-                
-                // v1.0.8 keys:
                 "target_duration" => "🎯 演讲目标时长 (分钟):",
                 "calibrate_btn" => "🧮 根据目标时长自动对齐滚速",
                 "fullscreen_hint" => "• F11 / F 键：切换全屏模式 (Fullscreen)",
+                
+                // v1.0.9 keys:
+                "window_opacity" => "🪟 玻璃悬浮窗不透明度 (Opacity):",
+                "cue_title" => "💡 演示提示 (Presenter Cue):",
                 _ => "",
             },
             UiLanguage::English => match key {
@@ -362,11 +383,13 @@ impl TeleprompterApp {
                 "ui_lang" => "UI Language:",
                 "clear_text" => "🗑️ Clear Text",
                 "load_template" => "📋 Load Template",
-                
-                // v1.0.8 keys:
                 "target_duration" => "🎯 Target Duration (Minutes):",
                 "calibrate_btn" => "🧮 Align Scroll Speed to Target",
                 "fullscreen_hint" => "• F11 / F Key: Toggle borderless Fullscreen",
+                
+                // v1.0.9 keys:
+                "window_opacity" => "🪟 Window Glass Opacity:",
+                "cue_title" => "💡 Presenter Cue:",
                 _ => "",
             }
         }
@@ -426,7 +449,7 @@ impl TeleprompterApp {
 
     fn jump_to_section(&mut self, idx: usize) {
         if idx < self.sections.len() {
-            self.target_scroll_y = self.sections[idx].1;
+            self.target_scroll_y = self.sections[idx].offset_y;
             self.record_action();
         }
     }
@@ -470,6 +493,7 @@ impl TeleprompterApp {
             enable_timer_limit: self.enable_timer_limit,
             timer_limit_minutes: self.timer_limit_minutes,
             target_duration_minutes: self.target_duration_minutes,
+            window_opacity: self.window_opacity,
         };
         save_config(&config);
     }
@@ -552,7 +576,7 @@ impl eframe::App for TeleprompterApp {
             self.prev_always_on_top = self.always_on_top;
         }
 
-        // Viewport Fullscreen command dispatcher (v1.0.8)
+        // Viewport Fullscreen command dispatcher
         if self.fullscreen != self.prev_fullscreen {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
             self.prev_fullscreen = self.fullscreen;
@@ -590,12 +614,19 @@ impl eframe::App for TeleprompterApp {
             }
         }
 
-        // Window style
-        let frame_style = if self.mode == AppMode::Prompter {
-            egui::Frame::none().fill(self.bg_color)
+        // Apply alpha transparency values to the background in Prompter mode
+        let final_bg = if self.mode == AppMode::Prompter {
+            let alpha = (self.window_opacity * 255.0) as u8;
+            egui::Color32::from_rgba_unmultiplied(
+                self.bg_color.r(),
+                self.bg_color.g(),
+                self.bg_color.b(),
+                alpha,
+            )
         } else {
-            egui::Frame::none().fill(ctx.style().visuals.window_fill())
+            ctx.style().visuals.window_fill()
         };
+        let frame_style = egui::Frame::none().fill(final_bg);
         
         egui::CentralPanel::default().frame(frame_style).show(ctx, |ui| {
             match self.mode {
@@ -628,6 +659,7 @@ impl TeleprompterApp {
         let old_enable_timer_limit = self.enable_timer_limit;
         let old_timer_limit_minutes = self.timer_limit_minutes;
         let old_target_duration_minutes = self.target_duration_minutes;
+        let old_window_opacity = self.window_opacity;
 
         // Evaluate all translation keys FIRST to prevent immutable-mutable borrow conflicts on self
         let tr_title = self.tr("title");
@@ -664,10 +696,11 @@ impl TeleprompterApp {
         let sc_m = self.tr("sc_m");
         let sc_g = self.tr("sc_g");
 
-        // v1.0.8 translations
+        // v1.0.8 & v1.0.9 translations
         let tr_target_duration = self.tr("target_duration");
         let tr_calibrate_btn = self.tr("calibrate_btn");
         let tr_fullscreen_hint = self.tr("fullscreen_hint");
+        let tr_window_opacity = self.tr("window_opacity");
 
         ui.vertical(|ui| {
             // Header bar
@@ -684,6 +717,7 @@ impl TeleprompterApp {
                         self.elapsed_secs = 0.0;
                         self.remaining_limit_secs = self.timer_limit_minutes * 60.0;
                         self.fullscreen = false;
+                        self.last_active_sec_idx = None;
                         self.record_action();
                         self.last_update = Instant::now();
                     }
@@ -713,6 +747,13 @@ impl TeleprompterApp {
                         ui.checkbox(&mut self.always_on_top, tr_always_on_top);
                         ui.add_space(6.0);
 
+                        // Window glass opacity/transparency (v1.0.9)
+                        ui.horizontal(|ui| {
+                            ui.label(tr_window_opacity);
+                            ui.add(egui::Slider::new(&mut self.window_opacity, 0.1..=1.0).suffix(" x"));
+                        });
+                        ui.add_space(6.0);
+
                         // Timer configurations
                         ui.checkbox(&mut self.enable_timer_limit, tr_timer_enable);
                         if self.enable_timer_limit {
@@ -726,7 +767,7 @@ impl TeleprompterApp {
                         ui.separator();
                         ui.add_space(8.0);
 
-                        // Target Duration speed calibrator (v1.0.8)
+                        // Target Duration speed calibrator
                         ui.horizontal(|ui| {
                             ui.label(tr_target_duration);
                             ui.add(egui::Slider::new(&mut self.target_duration_minutes, 0.5..=10.0).suffix(" m"));
@@ -904,6 +945,7 @@ impl TeleprompterApp {
             || old_enable_timer_limit != self.enable_timer_limit
             || old_timer_limit_minutes != self.timer_limit_minutes
             || old_target_duration_minutes != self.target_duration_minutes
+            || old_window_opacity != self.window_opacity
         {
             self.save_settings();
         }
@@ -963,6 +1005,7 @@ impl TeleprompterApp {
             self.countdown_secs = 0.0;
             self.elapsed_secs = 0.0;
             self.remaining_limit_secs = self.timer_limit_minutes * 60.0;
+            self.last_active_sec_idx = None;
             self.record_action();
             ctx.request_repaint();
         }
@@ -1039,7 +1082,7 @@ impl TeleprompterApp {
 
         // Paragraph-based custom layout loop with syntax highlighting and jump section calculations
         let mut current_y = 0.0;
-        let mut temp_sections = Vec::new();
+        let mut temp_sections: Vec<SectionInfo> = Vec::new();
         
         // Tracks stateful language blocks in parsing
         let mut current_block_lang = LanguageFilter::All;
@@ -1069,13 +1112,47 @@ impl TeleprompterApp {
             
             let extra_space = if is_header {
                 let clean_name = trimmed.replace("===", "").trim().to_string();
-                temp_sections.push((clean_name, current_y));
+                temp_sections.push(SectionInfo {
+                    name: clean_name,
+                    offset_y: current_y,
+                    speed: None,
+                    cues: Vec::new(),
+                });
                 self.font_size * 0.8
             } else if is_meta {
                 self.font_size * 0.2
             } else {
                 0.0
             };
+
+            // Parse Section Speed and Cue tags (v1.0.9)
+            // Example: [speed: 75] or [cue: Make eye contact]
+            let is_tag = trimmed.starts_with("[") && trimmed.ends_with("]");
+            let mut is_speed_tag = false;
+            let mut is_cue_tag = false;
+
+            if is_tag {
+                let inner = &trimmed[1..trimmed.len() - 1];
+                if inner.starts_with("speed:") {
+                    if let Ok(parsed_speed) = inner["speed:".len()..].trim().parse::<f32>() {
+                        is_speed_tag = true;
+                        if let Some(current_sec) = temp_sections.last_mut() {
+                            current_sec.speed = Some(parsed_speed);
+                        }
+                    }
+                } else if inner.starts_with("cue:") {
+                    is_cue_tag = true;
+                    let cue_text = inner["cue:".len()..].trim().to_string();
+                    if let Some(current_sec) = temp_sections.last_mut() {
+                        current_sec.cues.push(cue_text);
+                    }
+                }
+            }
+
+            // Do not render speed and cue tags in the scrolling viewport
+            if is_speed_tag || is_cue_tag {
+                continue;
+            }
 
             // Layout the line/paragraph using the correct format and bold parser
             let mut job = parse_formatted_line(
@@ -1128,9 +1205,19 @@ impl TeleprompterApp {
 
         // Calculate active section index
         let mut active_sec_idx = None;
-        for (idx, &(_, offset_y)) in self.sections.iter().enumerate() {
-            if self.scroll_y >= offset_y - 30.0 {
+        for (idx, sec) in self.sections.iter().enumerate() {
+            if self.scroll_y >= sec.offset_y - 30.0 {
                 active_sec_idx = Some(idx);
+            }
+        }
+
+        // Trigger transition-based speed adjustments (v1.0.9)
+        if active_sec_idx != self.last_active_sec_idx {
+            self.last_active_sec_idx = active_sec_idx;
+            if let Some(idx) = active_sec_idx {
+                if let Some(section_speed) = self.sections[idx].speed {
+                    self.scroll_speed = section_speed;
+                }
             }
         }
 
@@ -1248,14 +1335,14 @@ impl TeleprompterApp {
             let step_y = 24.0;
             let max_visible_sections = ((height - 180.0) / step_y) as usize;
 
-            for (idx, (name, _)) in self.sections.iter().enumerate().take(max_visible_sections) {
+            for (idx, sec) in self.sections.iter().enumerate().take(max_visible_sections) {
                 let is_active = Some(idx) == active_sec_idx;
                 let color = if is_active { cyan_accent } else { hud_text_color };
                 let prefix = if is_active { "● " } else { "○ " };
                 
                 // Truncate name if it exceeds the margin width safely
                 let max_chars = ((padding - 40.0) / 10.0).max(10.0) as usize;
-                let truncated_name: String = name.chars().take(max_chars).collect();
+                let truncated_name: String = sec.name.chars().take(max_chars).collect();
                 let display_name = format!("{}{}", prefix, truncated_name);
                 
                 let font_sec = if is_active {
@@ -1298,7 +1385,7 @@ impl TeleprompterApp {
             let mut preview_height = 0.0;
             if let Some(active_idx) = active_sec_idx {
                 if active_idx + 1 < self.sections.len() {
-                    let next_name = &self.sections[active_idx + 1].0;
+                    let next_name = &self.sections[active_idx + 1].name;
                     
                     let max_chars = ((padding - 45.0) / 10.0).max(10.0) as usize;
                     let truncated_next: String = next_name.chars().take(max_chars).collect();
@@ -1328,6 +1415,56 @@ impl TeleprompterApp {
                 egui::Shape::galley(egui::Pos2::new(right_panel_x, right_panel_y + 60.0 + preview_height + 25.0), clock_galley, hud_text_color),
                 center_x,
             );
+        }
+
+        // Draw Presenter Cue (v1.0.9 Pop-Up Card)
+        if let Some(active_idx) = active_sec_idx {
+            if active_idx < self.sections.len() {
+                let active_cues = &self.sections[active_idx].cues;
+                if !active_cues.is_empty() {
+                    let cue_text = active_cues.join(" | ");
+                    let overlay_bg = egui::Color32::from_rgba_unmultiplied(0, 151, 167, 180); // Cyan overlay
+                    let tr_cue_title = self.tr("cue_title");
+                    let display_str = format!("{} {}", tr_cue_title, cue_text);
+                    
+                    let font_cue = egui::FontId::new(14.0, egui::FontFamily::Proportional);
+                    let job = parse_formatted_line(
+                        &display_str,
+                        font_cue.size,
+                        egui::Color32::WHITE,
+                        egui::Color32::from_rgb(255, 235, 59),
+                        width - 300.0,
+                        false,
+                        false,
+                    );
+                    let cue_galley = ui.fonts(|f| f.layout_job(job));
+                    let cue_width = cue_galley.rect.width();
+                    
+                    let x_pos = center_x - (cue_width / 2.0);
+                    let y_pos = rect.min.y + 40.0;
+                    
+                    // Draw a subtle border backing card
+                    let card_rect = egui::Rect::from_min_max(
+                        egui::Pos2::new(x_pos - 15.0, y_pos - 6.0),
+                        egui::Pos2::new(x_pos + cue_width + 15.0, y_pos + cue_galley.rect.height() + 6.0),
+                    );
+                    
+                    self.paint_shape(
+                        ctx,
+                        ui.painter(),
+                        ui.clip_rect(),
+                        egui::Shape::rect_filled(card_rect, 6.0, overlay_bg),
+                        center_x,
+                    );
+                    self.paint_shape(
+                        ctx,
+                        ui.painter(),
+                        ui.clip_rect(),
+                        egui::Shape::galley(egui::Pos2::new(x_pos, y_pos), cue_galley, egui::Color32::WHITE),
+                        center_x,
+                    );
+                }
+            }
         }
 
         // 5. Draw Scrolling Progress Bar (Cyan thin line at the top)
@@ -1428,6 +1565,8 @@ impl TeleprompterApp {
 }
 
 const DEFAULT_TEXT: &str = r#"=== PAGE 1: Opening & Hardware Product Definition ===
+[speed: 65]
+[cue: 动作：微笑致意，保持眼神交流]
 [中文]
 各位评委老师，早上好。我是陶鑫旺。正如我作品集第一页所示，我将自己定位为**机器人系统研发工程师**与**工业AI全栈实践者**。我始终致力于打破代码与物理世界之间的边界。
 
@@ -1439,6 +1578,8 @@ Good morning, respected judges. I am Xinwang Tao. As shown on the first page of 
 My first core achievement lies in **hardware product definition**. During the InnoX Camp mentored by Prof. Zexiang Li—you can see our roadshow group photo in Fig. 1—I led the 0-to-1 development of the smart hardware, Lumina. Targeting the 'decision paralysis' caused by high-functioning anxiety among young people, we innovatively designed a physical mechanism with **'weighted rotor dynamic damping torque feedback,'** reifying psychological mechanisms into the physical world.
 
 === PAGE 2: Commercial Updates & Achievement 2: Industrial AI ===
+[speed: 70]
+[cue: 动作：指向图2 Demo，展现商业野心]
 [中文]
 请翻到第2页。在产品落地阶段，如顶部图2所示，通过持续、高强度的MVP快速迭代，我们成功打磨出了一款高度精致的产品Demo。
 
@@ -1454,6 +1595,8 @@ Please turn to PAGE 2. In the product implementation phase, as shown in Fig. 2 a
 Beyond agile hardware development, my second core achievement is the **full-stack deployment of frontline industrial AI**. Please look at Fig. 3 in the middle; this is the industrial AI Agent decision-making flow architecture I built. Facing the complex, non-standard SMT workshops, I developed a highly efficient video processing pipeline, cleaning 1,289 error-related video segments as a Vision Large Model (VLM) fine-tuning foundation. Based on the LangGraph state machine and ReAct logic, this closed-loop system is now deployed on actual production lines, demonstrating the immense potential to replace approximately 30% of heavy manual visual inspection roles.
 
 === PAGE 3: Achievement 3: Systems Engineering & Commercialization ===
+[speed: 60]
+[cue: 动作：加重语气，介绍云影智巡CTO成果]
 [中文]
 请翻到第3页。我的第三个核心成果是大型系统的商业化运营。作为科技初创企业‘云影智巡’的CTO，我全面领导了机器人技术（包括教育无人机和仿生扑翼微型飞行器）的全栈研发。
 
@@ -1465,6 +1608,8 @@ Please turn to PAGE 3. My third core achievement is the commercial operation of 
 Fig. 4 on the left displays the hardcore iterative process of our multi-generation bionic flapping-wing UAVs. Fig. 5 on the right maps out the cross-disciplinary tech stack supporting this product matrix. Based on underlying architectures like ArduPilot and PX4, we successfully resolved engineering challenges such as compass calibration and complex PID tuning.
 
 === PAGE 4: Commercial Validation & IP Moat ===
+[speed: 65]
+[cue: 动作：展示互联网+银奖与股交所挂牌证书]
 [中文]
 第4页展示了我们的商业验证与技术护城河。图6来自于我们在‘互联网+’大赛中荣获国家级银奖的颁奖现场。图7是我们公司在湖南股权交易所成功挂牌的证书。
 
@@ -1476,6 +1621,8 @@ PAGE 4 showcases our commercial validation and technical moats. Fig. 6 is from t
 To build technical barriers, as shown in Fig. 8 in the middle, I accumulated **over 10 invention patents and software copyrights** as the core inventor. Additionally, Fig. 9 at the bottom proves that I obtained the HarmonyOS Advanced Application Developer Certification, demonstrating a comprehensive ecosystem-building capability.
 
 === PAGE 5: Achievement 4: Academic Research & Theory ===
+[speed: 55]
+[cue: 动作：指向学术论文，语调保持沉稳、严谨]
 [中文]
 工程痛点反向驱动了我对学术界的深耕。请看包含我第四个成果的第5页。
 
@@ -1487,6 +1634,8 @@ Engineering pain points have inversely driven my deep dive into academia. Please
 Fig. 12 on the bottom left is my research on a bionic UAV spatial linkage mechanism published in the JCR Q1 journal, Biomimetics, where we conquered control challenges under complex turbulence. Fig. 13 on the bottom right is the Predictive Local Multiple Attention (PLMA) model published in the top-tier autonomous driving journal, IEEE TVT. As the second author, I independently designed the core evolutionary network topology and completed high-precision risk assessment validation on real-world datasets.
 
 === PAGE 6: Full-Stack Skill Tree & Vision ===
+[speed: 70]
+[cue: 动作：眼神交流，自信有力地收尾]
 [中文]
 最后，请看第6页。顶部区域总结了我的全栈技能树。从熟练使用Cursor等AI工具构建自动化工作流，到将边缘计算底层彻底从C++重构为性能更高的Rust语言并部署在ESP32-S3微控制器上——我正不断且敏捷地迭代我的技术边界。
 
