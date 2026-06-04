@@ -136,9 +136,10 @@ struct AppConfig {
     timer_limit_minutes: f32,
     target_duration_minutes: f32,
     window_opacity: f32,
-    // Upgrades (v1.1.0):
     countdown_duration_secs: f32,
     enable_slide_alerts: bool,
+    #[serde(default)]
+    transparent_background: bool, // Pure transparent background (v1.1.1)
 }
 
 impl Default for AppConfig {
@@ -163,6 +164,7 @@ impl Default for AppConfig {
             window_opacity: 1.0,
             countdown_duration_secs: 3.0,
             enable_slide_alerts: true,
+            transparent_background: false,
         }
     }
 }
@@ -236,6 +238,9 @@ struct TeleprompterApp {
     countdown_duration_secs: f32, // User configurable countdown duration (1s to 10s)
     enable_slide_alerts: bool, // Toggle flashing slide prompts
     active_slide_alert: Option<String>, // Stores slide number to flash (e.g. "PAGE 3")
+
+    // Iteration Upgrades (v1.1.1):
+    transparent_background: bool, // Toggle completely transparent overlay mode
 }
 
 fn load_initial_text() -> String {
@@ -304,6 +309,7 @@ impl Default for TeleprompterApp {
             countdown_duration_secs: config.countdown_duration_secs,
             enable_slide_alerts: config.enable_slide_alerts,
             active_slide_alert: None,
+            transparent_background: config.transparent_background,
         };
         app.apply_color_preset();
         app
@@ -356,8 +362,6 @@ impl TeleprompterApp {
                 "fullscreen_hint" => "• F11 / F 键：切换全屏模式 (Fullscreen)",
                 "window_opacity" => "🪟 玻璃悬浮窗不透明度 (Opacity):",
                 "cue_title" => "💡 演示提示 (Presenter Cue):",
-                
-                // v1.1.0 keys:
                 "countdown_duration" => "⏲️ 准备倒计时时长 (秒):",
                 "enable_slide_alerts" => "📢 开启幻灯片物理翻页强提醒",
                 "slide_alert_banner" => "👉 请将 PPT 翻页至：",
@@ -365,6 +369,9 @@ impl TeleprompterApp {
                 "stats_chars" => "• 字符数(含标点):",
                 "stats_words" => "• 英文单词数:",
                 "stats_time" => "• 预计阅读时长(按当前速度):",
+                
+                // v1.1.1 keys:
+                "transparent_background" => "👻 开启背景完全透明 (仅文字可见)",
                 _ => "",
             },
             UiLanguage::English => match key {
@@ -409,15 +416,16 @@ impl TeleprompterApp {
                 "fullscreen_hint" => "• F11 / F Key: Toggle borderless Fullscreen",
                 "window_opacity" => "🪟 Window Glass Opacity:",
                 "cue_title" => "💡 Presenter Cue:",
-                
-                // v1.1.0 keys:
-                "countdown_duration" => "⏲️ Countdown Duration (s):",
+                "countdown_duration" => "Countdown Duration (s):",
                 "enable_slide_alerts" => "📢 Enable Slide Flip Alert Badges",
                 "slide_alert_banner" => "👉 FLIP TO SLIDE:",
                 "stats_title" => "📊 Script Analysis & Metrics",
                 "stats_chars" => "• Total Characters:",
                 "stats_words" => "• English Word Count:",
                 "stats_time" => "• Est. Reading Time (at current speed):",
+                
+                // v1.1.1 keys:
+                "transparent_background" => "👻 Pure Transparent Background (Text Only)",
                 _ => "",
             }
         }
@@ -524,6 +532,7 @@ impl TeleprompterApp {
             window_opacity: self.window_opacity,
             countdown_duration_secs: self.countdown_duration_secs,
             enable_slide_alerts: self.enable_slide_alerts,
+            transparent_background: self.transparent_background,
         };
         save_config(&config);
     }
@@ -646,13 +655,17 @@ impl eframe::App for TeleprompterApp {
 
         // Apply alpha transparency values to the background in Prompter mode
         let final_bg = if self.mode == AppMode::Prompter {
-            let alpha = (self.window_opacity * 255.0) as u8;
-            egui::Color32::from_rgba_unmultiplied(
-                self.bg_color.r(),
-                self.bg_color.g(),
-                self.bg_color.b(),
-                alpha,
-            )
+            if self.transparent_background {
+                egui::Color32::TRANSPARENT // Pure transparent window (v1.1.1)
+            } else {
+                let alpha = (self.window_opacity * 255.0) as u8;
+                egui::Color32::from_rgba_unmultiplied(
+                    self.bg_color.r(),
+                    self.bg_color.g(),
+                    self.bg_color.b(),
+                    alpha,
+                )
+            }
         } else {
             ctx.style().visuals.window_fill()
         };
@@ -692,6 +705,7 @@ impl TeleprompterApp {
         let old_window_opacity = self.window_opacity;
         let old_countdown_duration_secs = self.countdown_duration_secs;
         let old_enable_slide_alerts = self.enable_slide_alerts;
+        let old_transparent_background = self.transparent_background;
 
         // Evaluate all translation keys FIRST to prevent immutable-mutable borrow conflicts on self
         let tr_title = self.tr("title");
@@ -728,7 +742,7 @@ impl TeleprompterApp {
         let sc_m = self.tr("sc_m");
         let sc_g = self.tr("sc_g");
 
-        // v1.0.8, v1.0.9 & v1.1.0 translations
+        // v1.0.8, v1.0.9, v1.1.0 & v1.1.1 translations
         let tr_target_duration = self.tr("target_duration");
         let tr_calibrate_btn = self.tr("calibrate_btn");
         let tr_fullscreen_hint = self.tr("fullscreen_hint");
@@ -739,6 +753,7 @@ impl TeleprompterApp {
         let tr_stats_chars = self.tr("stats_chars");
         let tr_stats_words = self.tr("stats_words");
         let tr_stats_time = self.tr("stats_time");
+        let tr_transparent_background = self.tr("transparent_background");
 
         // Calculate Text Statistics
         let char_count = self.text.chars().count();
@@ -798,21 +813,27 @@ impl TeleprompterApp {
                         ui.checkbox(&mut self.always_on_top, tr_always_on_top);
                         ui.add_space(6.0);
 
-                        // Window glass opacity/transparency
-                        ui.horizontal(|ui| {
-                            ui.label(tr_window_opacity);
-                            ui.add(egui::Slider::new(&mut self.window_opacity, 0.1..=1.0).suffix(" x"));
-                        });
+                        // Pure Transparent Background checkbox (v1.1.1)
+                        ui.checkbox(&mut self.transparent_background, tr_transparent_background);
                         ui.add_space(6.0);
 
-                        // Countdown duration adjust (v1.1.0)
+                        // Window glass opacity/transparency slider (only enabled if not fully transparent)
+                        if !self.transparent_background {
+                            ui.horizontal(|ui| {
+                                ui.label(tr_window_opacity);
+                                ui.add(egui::Slider::new(&mut self.window_opacity, 0.1..=1.0).suffix(" x"));
+                            });
+                            ui.add_space(6.0);
+                        }
+
+                        // Countdown duration adjust
                         ui.horizontal(|ui| {
                             ui.label(tr_countdown_duration);
                             ui.add(egui::Slider::new(&mut self.countdown_duration_secs, 1.0..=10.0).suffix(" s"));
                         });
                         ui.add_space(6.0);
 
-                        // Slide Flip alerts toggle (v1.1.0)
+                        // Slide Flip alerts toggle
                         ui.checkbox(&mut self.enable_slide_alerts, tr_enable_slide_alerts);
                         ui.add_space(6.0);
 
@@ -940,7 +961,7 @@ impl TeleprompterApp {
                         });
                     });
 
-                    // Text Script Stats Box (v1.1.0)
+                    // Text Script Stats Box
                     ui.add_space(10.0);
                     ui.group(|ui| {
                         ui.heading(tr_stats_title);
@@ -1020,6 +1041,7 @@ impl TeleprompterApp {
             || old_window_opacity != self.window_opacity
             || old_countdown_duration_secs != self.countdown_duration_secs
             || old_enable_slide_alerts != self.enable_slide_alerts
+            || old_transparent_background != self.transparent_background
         {
             self.save_settings();
         }
@@ -1290,7 +1312,7 @@ impl TeleprompterApp {
         self.sections = temp_sections;
         self.max_scroll = (current_y - height + guide_y + 100.0).max(0.0);
 
-        // Assign current active slide flip alert badge (v1.1.0)
+        // Assign current active slide flip alert badge
         self.active_slide_alert = slide_alert_to_trigger;
 
         // Calculate active section index
@@ -1356,25 +1378,30 @@ impl TeleprompterApp {
                 rect.left_top(),
                 egui::Pos2::new(rect.max.x, rect.min.y + fade_height),
             );
-            self.draw_fade_gradient(ui.painter(), top_rect, self.bg_color, true);
+            let fade_color = if self.transparent_background {
+                egui::Color32::TRANSPARENT
+            } else {
+                self.bg_color
+            };
+            self.draw_fade_gradient(ui.painter(), top_rect, fade_color, true);
 
             // Bottom fade rect
             let bottom_rect = egui::Rect::from_min_max(
                 egui::Pos2::new(rect.min.x, rect.max.y - fade_height),
                 rect.right_bottom(),
             );
-            self.draw_fade_gradient(ui.painter(), bottom_rect, self.bg_color, false);
+            self.draw_fade_gradient(ui.painter(), bottom_rect, fade_color, false);
         }
 
         // 4. Draw Presenter Guide HUD (Left/Right panels in margins)
         let has_room_for_hud = padding >= 150.0;
         if self.show_hud && has_room_for_hud && self.countdown_secs <= 0.0 {
-            let hud_text_color = if self.bg_color == egui::Color32::WHITE {
+            let hud_text_color = if self.bg_color == egui::Color32::WHITE && !self.transparent_background {
                 egui::Color32::DARK_GRAY
             } else {
                 egui::Color32::from_rgb(176, 190, 197) // Clean secondary grey
             };
-            let cyan_accent = egui::Color32::from_rgb(0, 151, 167);
+            let cyan_accent = egui::Color32::from_rgb(0, 188, 212);
 
             // LEFT PANEL: Dynamic Timer & Mini Table of Contents
             let left_panel_x = rect.min.x + 20.0;
