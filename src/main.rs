@@ -250,6 +250,10 @@ struct AppConfig {
     text_align: TextAlignment,
     #[serde(default = "default_true")]
     enable_web_remote: bool,
+    #[serde(default)]
+    practice_mode: bool,
+    #[serde(default = "default_true")]
+    enable_pace_breathing: bool,
 }
 
 fn default_true() -> bool {
@@ -282,6 +286,8 @@ impl Default for AppConfig {
             mouse_passthrough: false,
             text_align: TextAlignment::Left,
             enable_web_remote: true,
+            practice_mode: false,
+            enable_pace_breathing: true,
         }
     }
 }
@@ -368,6 +374,10 @@ struct TeleprompterApp {
     enable_web_remote: bool, // Toggle HTTP Remote controller
     shared_remote_state: Arc<Mutex<SharedRemoteState>>, // Cross-thread shared controller state
     local_ip: String, // Resolved local IP address for phone remote scanning
+
+    // Iteration Upgrades (v1.1.5):
+    practice_mode: bool, // Toggle Memorization/Practice Mode
+    enable_pace_breathing: bool, // Toggle HUD pacing metronome dot
 }
 
 fn load_initial_text() -> String {
@@ -455,6 +465,8 @@ impl TeleprompterApp {
             enable_web_remote: config.enable_web_remote,
             shared_remote_state: shared_state,
             local_ip,
+            practice_mode: config.practice_mode,
+            enable_pace_breathing: config.enable_pace_breathing,
         };
         app.apply_color_preset();
         app
@@ -523,6 +535,9 @@ impl TeleprompterApp {
                 "sc_passthrough_tip" => "💡 提示：开启鼠标穿透后，您可直接点击底层的PPT。如需退出，请在任务栏中点击本软件重新激活，再按 Esc 退出。",
                 "web_remote" => "📱 开启手机网页远程控制 (Mobile Remote)",
                 "remote_url" => "🔗 遥控器网址 (请用手机浏览器访问):",
+                "practice_mode" => "🧠 开启脱稿记忆练习模式 (隐藏非重点文字)",
+                "pace_breathing" => "🟢 启用视觉语速呼吸节拍器 (Pace Metronome)",
+                "drag_drop_tip" => "💡 提示：将任何 .txt 文件直接拖拽入本窗口即可快速导入演讲稿",
                 _ => "",
             },
             UiLanguage::English => match key {
@@ -583,6 +598,9 @@ impl TeleprompterApp {
                 "sc_passthrough_tip" => "💡 Note: When Passthrough is ON, click underlying apps. To exit, click this app's taskbar icon to refocus, then press Esc.",
                 "web_remote" => "📱 Enable Web Mobile Remote Control",
                 "remote_url" => "🔗 Remote URL (Open in phone browser):",
+                "practice_mode" => "🧠 Enable Memorization Practice Mode (Hide Normal Text)",
+                "pace_breathing" => "🟢 Enable Gaze Pace Breathing Metronome",
+                "drag_drop_tip" => "💡 Tip: Drag & drop any .txt script file directly here to import script",
                 _ => "",
             }
         }
@@ -693,6 +711,8 @@ impl TeleprompterApp {
             mouse_passthrough: self.mouse_passthrough,
             text_align: self.text_align,
             enable_web_remote: self.enable_web_remote,
+            practice_mode: self.practice_mode,
+            enable_pace_breathing: self.enable_pace_breathing,
         };
         save_config(&config);
     }
@@ -717,6 +737,7 @@ fn parse_formatted_line(
     is_header: bool,
     is_meta: bool,
     align: egui::Align, // Pass text alignment
+    practice_mode: bool, // Toggle Memorization/Practice Mode
 ) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = wrapping_width;
@@ -734,6 +755,8 @@ fn parse_formatted_line(
         egui::Color32::from_rgb(0, 188, 212) // Cyan for headers
     } else if is_meta {
         egui::Color32::from_rgb(120, 144, 156) // Muted blue-grey for metadata/tags
+    } else if practice_mode {
+        egui::Color32::from_rgba_unmultiplied(base_color.r(), base_color.g(), base_color.b(), 18) // 8% opacity
     } else {
         base_color
     };
@@ -856,6 +879,19 @@ impl eframe::App for TeleprompterApp {
         let dt = now.duration_since(self.last_update).as_secs_f32();
         self.last_update = now;
 
+        // Capture dropped files (v1.1.5)
+        let dropped_path = ctx.input(|i| {
+            i.raw.dropped_files.first().and_then(|f| f.path.clone())
+        });
+        
+        if let Some(path) = dropped_path {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                self.text = content;
+                save_text(&self.text);
+                self.save_settings();
+            }
+        }
+
         // Viewport Always-on-top command dispatcher
         if self.always_on_top != self.prev_always_on_top {
             let level = if self.always_on_top {
@@ -968,6 +1004,8 @@ impl TeleprompterApp {
         let old_mouse_passthrough = self.mouse_passthrough;
         let old_text_align = self.text_align;
         let old_enable_web_remote = self.enable_web_remote;
+        let old_practice_mode = self.practice_mode;
+        let old_enable_pace_breathing = self.enable_pace_breathing;
 
         // Evaluate all translation keys FIRST to prevent immutable-mutable borrow conflicts on self
         let tr_title = self.tr("title");
@@ -1024,6 +1062,10 @@ impl TeleprompterApp {
         
         let tr_web_remote = self.tr("web_remote");
         let tr_remote_url = self.tr("remote_url");
+        
+        let tr_practice_mode = self.tr("practice_mode");
+        let tr_pace_breathing = self.tr("pace_breathing");
+        let tr_drag_drop_tip = self.tr("drag_drop_tip");
 
         // Calculate Text Statistics
         let char_count = self.text.chars().count();
@@ -1248,6 +1290,10 @@ impl TeleprompterApp {
                                 ui.checkbox(&mut self.enable_focus_mode, tr_focus_mode);
                                 ui.checkbox(&mut self.show_hud, tr_show_hud);
                                 ui.add_space(4.0);
+                                
+                                ui.checkbox(&mut self.practice_mode, tr_practice_mode);
+                                ui.checkbox(&mut self.enable_pace_breathing, tr_pace_breathing);
+                                ui.add_space(4.0);
 
                                 ui.horizontal(|ui| {
                                     ui.label(tr_lang_filter);
@@ -1380,6 +1426,8 @@ impl TeleprompterApp {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.add(text_edit);
                     });
+                    ui.add_space(4.0);
+                    ui.colored_label(egui::Color32::from_rgb(120, 144, 156), tr_drag_drop_tip);
                     if self.text != previous_text {
                         save_text(&self.text);
                     }
@@ -1411,6 +1459,8 @@ impl TeleprompterApp {
             || old_mouse_passthrough != self.mouse_passthrough
             || old_text_align != self.text_align
             || old_enable_web_remote != self.enable_web_remote
+            || old_practice_mode != self.practice_mode
+            || old_enable_pace_breathing != self.enable_pace_breathing
         {
             self.save_settings();
         }
@@ -1642,6 +1692,7 @@ impl TeleprompterApp {
                 is_header,
                 is_meta,
                 self.text_align.to_egui_align(),
+                self.practice_mode,
             );
             
             let galley = ui.fonts(|f| f.layout_job(job.clone()));
@@ -1900,6 +1951,47 @@ impl TeleprompterApp {
                 egui::Shape::galley(egui::Pos2::new(right_panel_x, right_panel_y + 60.0 + preview_height + 25.0), clock_galley, hud_text_color),
                 center_x,
             );
+
+            // 4. Pace Breathing Metronome Dot (v1.1.5)
+            if self.enable_pace_breathing {
+                let bpm = (cpm as f32).clamp(100.0, 600.0) / 4.0; // Pacing freq based on CPM
+                let pulse_freq = bpm / 60.0;
+                let pulse = ((self.elapsed_secs * std::f32::consts::PI * 2.0 * pulse_freq).sin() + 1.0) / 2.0;
+                
+                let metronome_y = right_panel_y + 60.0 + preview_height + 65.0;
+                let center = egui::Pos2::new(right_panel_x + 12.0, metronome_y);
+                let base_radius = 6.0;
+                let glow_radius = base_radius + 5.0 * pulse;
+                
+                let color_solid = egui::Color32::from_rgb(76, 175, 80); // Green
+                let color_glow = egui::Color32::from_rgba_unmultiplied(76, 175, 80, (90.0 * (1.0 - pulse)) as u8);
+                
+                self.paint_shape(
+                    ctx,
+                    ui.painter(),
+                    ui.clip_rect(),
+                    egui::Shape::circle_filled(center, glow_radius, color_glow),
+                    center_x,
+                );
+                self.paint_shape(
+                    ctx,
+                    ui.painter(),
+                    ui.clip_rect(),
+                    egui::Shape::circle_filled(center, base_radius, color_solid),
+                    center_x,
+                );
+                
+                let metro_str = "METRONOME".to_string();
+                let font_metro = egui::FontId::new(11.0, egui::FontFamily::Proportional);
+                let metro_galley = ui.fonts(|f| f.layout(metro_str, font_metro, hud_text_color, padding - 45.0));
+                self.paint_shape(
+                    ctx,
+                    ui.painter(),
+                    ui.clip_rect(),
+                    egui::Shape::galley(egui::Pos2::new(right_panel_x + 30.0, metronome_y - 6.0), metro_galley, hud_text_color),
+                    center_x,
+                );
+            }
         }
 
         // Draw Presenter Cue (v1.0.9 Pop-Up Card)
@@ -1922,6 +2014,7 @@ impl TeleprompterApp {
                         false,
                         false,
                         egui::Align::Center,
+                        false,
                     );
                     let cue_galley = ui.fonts(|f| f.layout_job(job));
                     let cue_width = cue_galley.rect.width();
