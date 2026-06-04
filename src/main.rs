@@ -1,6 +1,10 @@
 // -*- coding: utf-8 -*-
 use eframe::egui;
 use std::time::Instant;
+use std::net::{TcpListener, TcpStream};
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -10,13 +14,36 @@ fn main() -> eframe::Result<()> {
             .with_transparent(true), // Enable OS transparent window capabilities
         ..Default::default()
     };
+    
+    // Spawn Web Remote Control server in the background
+    let shared_state = Arc::new(Mutex::new(SharedRemoteState::default()));
+    let state_clone = shared_state.clone();
+    
+    thread::spawn(move || {
+        let listener = match TcpListener::bind("0.0.0.0:9090") {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Failed to bind TcpListener on port 9090: {}", e);
+                return;
+            }
+        };
+        for stream in listener.incoming() {
+            if let Ok(stream) = stream {
+                let state_inner = state_clone.clone();
+                thread::spawn(move || {
+                    handle_client(stream, state_inner);
+                });
+            }
+        }
+    });
+
     eframe::run_native(
         "Sisyphus Rust Teleprompter",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             setup_custom_fonts(&cc.egui_ctx);
             configure_dark_theme(&cc.egui_ctx);
-            Ok(Box::new(TeleprompterApp::default()))
+            Ok(Box::new(TeleprompterApp::new(shared_state)) as Box<dyn eframe::App>)
         }),
     )
 }
@@ -107,7 +134,7 @@ enum UiLanguage {
     English,
 }
 
-// Text Alignment Enum (v1.1.2)
+// Text Alignment Enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum TextAlignment {
     Left,
@@ -131,13 +158,42 @@ impl TextAlignment {
     }
 }
 
-// Section structure mapping containing parsed tags
+// Section info structure
 #[derive(Debug, Clone)]
 struct SectionInfo {
     name: String,
     offset_y: f32,
     speed: Option<f32>,
     cues: Vec<String>,
+}
+
+// Shared State for Web Remote Controller
+struct SharedRemoteState {
+    is_playing: bool,
+    scroll_speed: f32,
+    scroll_y: f32,
+    max_scroll: f32,
+    elapsed_secs: f32,
+    remaining_secs: f32,
+    active_section_idx: Option<usize>,
+    sections: Vec<String>,
+    command_queue: Vec<String>,
+}
+
+impl Default for SharedRemoteState {
+    fn default() -> Self {
+        Self {
+            is_playing: false,
+            scroll_speed: 60.0,
+            scroll_y: 0.0,
+            max_scroll: 0.0,
+            elapsed_secs: 0.0,
+            remaining_secs: 0.0,
+            active_section_idx: None,
+            sections: Vec::new(),
+            command_queue: Vec::new(),
+        }
+    }
 }
 
 // Configuration persistence structure
@@ -164,11 +220,16 @@ struct AppConfig {
     enable_slide_alerts: bool,
     #[serde(default)]
     transparent_background: bool,
-    // Upgrades (v1.1.2):
     #[serde(default)]
-    mouse_passthrough: bool, // Allow clicking through the prompter window
+    mouse_passthrough: bool,
     #[serde(default)]
-    text_align: TextAlignment, // Custom script alignment
+    text_align: TextAlignment,
+    #[serde(default = "default_true")]
+    enable_web_remote: bool, // Toggle server integration
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -196,6 +257,7 @@ impl Default for AppConfig {
             transparent_background: false,
             mouse_passthrough: false,
             text_align: TextAlignment::Left,
+            enable_web_remote: true,
         }
     }
 }
@@ -277,6 +339,11 @@ struct TeleprompterApp {
     mouse_passthrough: bool, // Toggle click-through ghost mode
     prev_mouse_passthrough: bool,
     text_align: TextAlignment, // Text alignment selector
+
+    // Iteration Upgrades (v1.1.3):
+    enable_web_remote: bool, // Toggle HTTP Remote controller
+    shared_remote_state: Arc<Mutex<SharedRemoteState>>, // Cross-thread shared controller state
+    local_ip: String, // Resolved local IP address for phone remote scanning
 }
 
 fn load_initial_text() -> String {
@@ -298,9 +365,19 @@ fn save_text(text: &str) {
     let _ = std::fs::write("F:\\rust-teleprompter\\script.txt", text);
 }
 
-impl Default for TeleprompterApp {
-    fn default() -> Self {
+// Find active LAN IP address by connecting a temporary UDP socket to public DNS
+fn get_local_ip() -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let local_addr = socket.local_addr().ok()?;
+    Some(local_addr.ip().to_string())
+}
+
+impl TeleprompterApp {
+    fn new(shared_state: Arc<Mutex<SharedRemoteState>>) -> Self {
         let config = load_config();
+        let local_ip = get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string());
+        
         let mut app = Self {
             text: load_initial_text(),
             font_size: config.font_size,
@@ -350,6 +427,10 @@ impl Default for TeleprompterApp {
             mouse_passthrough: config.mouse_passthrough,
             prev_mouse_passthrough: config.mouse_passthrough,
             text_align: config.text_align,
+
+            enable_web_remote: config.enable_web_remote,
+            shared_remote_state: shared_state,
+            local_ip,
         };
         app.apply_color_preset();
         app
@@ -410,14 +491,14 @@ impl TeleprompterApp {
                 "stats_words" => "• 英文单词数:",
                 "stats_time" => "• 预计阅读时长(按当前速度):",
                 "transparent_background" => "👻 开启背景完全透明 (仅文字可见)",
-                
-                // v1.1.2 keys:
                 "mouse_passthrough" => "👻 开启鼠标穿透 (忽略点击，可操作底层软件)",
                 "text_align" => "文字对齐方式 (Alignment):",
                 "align_left" => "左对齐",
                 "align_center" => "居中对齐",
                 "align_right" => "右对齐",
                 "sc_passthrough_tip" => "💡 提示：开启鼠标穿透后，您可直接点击底层的PPT。如需退出，请在任务栏中点击本软件重新激活，再按 Esc 退出。",
+                "web_remote" => "📱 开启手机网页远程控制 (Mobile Remote)",
+                "remote_url" => "🔗 遥控器网址 (请用手机浏览器访问):",
                 _ => "",
             },
             UiLanguage::English => match key {
@@ -470,14 +551,14 @@ impl TeleprompterApp {
                 "stats_words" => "• English Word Count:",
                 "stats_time" => "• Est. Reading Time (at current speed):",
                 "transparent_background" => "👻 Pure Transparent Background (Text Only)",
-                
-                // v1.1.2 keys:
                 "mouse_passthrough" => "👻 Enable Mouse Passthrough (Ignore clicks for overlay)",
                 "text_align" => "Text Alignment:",
                 "align_left" => "Left",
                 "align_center" => "Center",
                 "align_right" => "Right",
                 "sc_passthrough_tip" => "💡 Note: When Passthrough is ON, click underlying apps. To exit, click this app's taskbar icon to refocus, then press Esc.",
+                "web_remote" => "📱 Enable Web Mobile Remote Control",
+                "remote_url" => "🔗 Remote URL (Open in phone browser):",
                 _ => "",
             }
         }
@@ -587,6 +668,7 @@ impl TeleprompterApp {
             transparent_background: self.transparent_background,
             mouse_passthrough: self.mouse_passthrough,
             text_align: self.text_align,
+            enable_web_remote: self.enable_web_remote,
         };
         save_config(&config);
     }
@@ -652,6 +734,96 @@ fn parse_formatted_line(
         is_bold = !is_bold;
     }
     job
+}
+
+impl TeleprompterApp {
+    fn consume_web_remote_commands(&mut self, ctx: &egui::Context) {
+        if !self.enable_web_remote {
+            return;
+        }
+        
+        // Extract commands from shared remote state by copying them first to release borrow on self
+        let commands = {
+            let mut s = match self.shared_remote_state.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            s.command_queue.drain(..).collect::<Vec<String>>()
+        };
+        
+        // Apply commands queued by phone controller safely
+        for cmd in commands {
+            self.record_action();
+            match cmd.as_str() {
+                "toggle" => {
+                    if self.countdown_secs > 0.0 {
+                        self.countdown_secs = 0.0;
+                        self.is_playing = true;
+                    } else {
+                        self.is_playing = !self.is_playing;
+                    }
+                }
+                "play" => {
+                    self.countdown_secs = 0.0;
+                    self.is_playing = true;
+                }
+                "pause" => {
+                    self.is_playing = false;
+                }
+                "speed_up" => {
+                    self.scroll_speed = (self.scroll_speed + 10.0).min(500.0);
+                }
+                "speed_down" => {
+                    self.scroll_speed = (self.scroll_speed - 10.0).max(5.0);
+                }
+                "page_up" => {
+                    self.target_scroll_y = (self.target_scroll_y - 150.0).max(0.0);
+                    ctx.request_repaint();
+                }
+                "page_down" => {
+                    self.target_scroll_y = (self.target_scroll_y + 150.0).min(self.max_scroll);
+                    ctx.request_repaint();
+                }
+                "reset" => {
+                    self.target_scroll_y = 0.0;
+                    self.scroll_y = 0.0;
+                    self.is_playing = false;
+                    self.countdown_secs = 0.0;
+                    self.elapsed_secs = 0.0;
+                    self.remaining_limit_secs = self.timer_limit_minutes * 60.0;
+                    self.active_slide_alert = None;
+                    ctx.request_repaint();
+                }
+                c if c.starts_with("jump:") => {
+                    if let Ok(idx) = c["jump:".len()..].parse::<usize>() {
+                        self.jump_to_section(idx);
+                        ctx.request_repaint();
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Push current GUI state to Web Remote State under a separate lock scope
+        if let Ok(mut s) = self.shared_remote_state.lock() {
+            s.is_playing = self.is_playing;
+            s.scroll_speed = self.scroll_speed;
+            s.scroll_y = self.scroll_y;
+            s.max_scroll = self.max_scroll;
+            s.elapsed_secs = self.elapsed_secs;
+            s.remaining_secs = if self.enable_timer_limit { self.remaining_limit_secs } else { self.elapsed_secs };
+            
+            // Find active section index
+            let mut active_idx = None;
+            for (idx, sec) in self.sections.iter().enumerate() {
+                if self.scroll_y >= sec.offset_y - 30.0 {
+                    active_idx = Some(idx);
+                }
+            }
+            s.active_section_idx = active_idx;
+            s.sections = self.sections.iter().map(|s| s.name.clone()).collect();
+        }
+    }
 }
 
 impl eframe::App for TeleprompterApp {
@@ -771,6 +943,7 @@ impl TeleprompterApp {
         let old_transparent_background = self.transparent_background;
         let old_mouse_passthrough = self.mouse_passthrough;
         let old_text_align = self.text_align;
+        let old_enable_web_remote = self.enable_web_remote;
 
         // Evaluate all translation keys FIRST to prevent immutable-mutable borrow conflicts on self
         let tr_title = self.tr("title");
@@ -807,7 +980,7 @@ impl TeleprompterApp {
         let sc_m = self.tr("sc_m");
         let sc_g = self.tr("sc_g");
 
-        // v1.0.8 to v1.1.2 translations
+        // v1.0.8 to v1.1.3 translations
         let tr_target_duration = self.tr("target_duration");
         let tr_calibrate_btn = self.tr("calibrate_btn");
         let tr_fullscreen_hint = self.tr("fullscreen_hint");
@@ -824,6 +997,9 @@ impl TeleprompterApp {
         let tr_align_left = self.tr("align_left");
         let tr_align_center = self.tr("align_center");
         let tr_align_right = self.tr("align_right");
+        
+        let tr_web_remote = self.tr("web_remote");
+        let tr_remote_url = self.tr("remote_url");
 
         // Calculate Text Statistics
         let char_count = self.text.chars().count();
@@ -883,7 +1059,7 @@ impl TeleprompterApp {
                         ui.checkbox(&mut self.always_on_top, tr_always_on_top);
                         ui.add_space(6.0);
 
-                        // Mouse passthrough click-through toggle (v1.1.2)
+                        // Mouse passthrough click-through toggle
                         ui.checkbox(&mut self.mouse_passthrough, tr_mouse_passthrough);
                         ui.add_space(6.0);
 
@@ -907,6 +1083,17 @@ impl TeleprompterApp {
                             ui.selectable_value(&mut self.text_align, TextAlignment::Center, tr_align_center);
                             ui.selectable_value(&mut self.text_align, TextAlignment::Right, tr_align_right);
                         });
+                        ui.add_space(6.0);
+
+                        // Web mobile remote controller checkbox (v1.1.3)
+                        ui.checkbox(&mut self.enable_web_remote, tr_web_remote);
+                        if self.enable_web_remote {
+                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
+                                ui.label(tr_remote_url);
+                                ui.colored_label(egui::Color32::from_rgb(0, 188, 212), format!("http://{}:9090", self.local_ip));
+                            });
+                        }
                         ui.add_space(8.0);
 
                         ui.separator();
@@ -1130,6 +1317,7 @@ impl TeleprompterApp {
             || old_transparent_background != self.transparent_background
             || old_mouse_passthrough != self.mouse_passthrough
             || old_text_align != self.text_align
+            || old_enable_web_remote != self.enable_web_remote
         {
             self.save_settings();
         }
@@ -1142,7 +1330,9 @@ impl TeleprompterApp {
         let height = rect.height();
         let center_x = rect.center().x;
         
-        // Listen to global inputs
+        // Listen to global inputs and consume remote mobile commands
+        self.consume_web_remote_commands(ctx);
+
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             if self.countdown_secs > 0.0 {
                 self.countdown_secs = 0.0;
@@ -1214,7 +1404,7 @@ impl TeleprompterApp {
             self.language_filter = match self.language_filter {
                 LanguageFilter::All => LanguageFilter::ChineseOnly,
                 LanguageFilter::ChineseOnly => LanguageFilter::EnglishOnly,
-                LanguageFilter::EnglishOnly => LanguageFilter::All,
+                LanguageFilter::EnglishOnly => KEY_LANG_FILTER_DEFAULT_STATE,
             };
             self.record_action();
             ctx.request_repaint();
@@ -1312,7 +1502,6 @@ impl TeleprompterApp {
             };
 
             // Parse Section Speed, Cue, and Slide tags
-            // Example: [speed: 75], [cue: Make eye contact], [slide: Page 2]
             let is_tag = trimmed.starts_with("[") && trimmed.ends_with("]");
             let mut is_speed_tag = false;
             let mut is_cue_tag = false;
@@ -1339,7 +1528,6 @@ impl TeleprompterApp {
                     
                     // We check if this slide tag is near the reading guide line (active line trigger)
                     let tag_draw_y = start_y + current_y - self.scroll_y;
-                    // Trigger alert when the slide tag line is within +/- 100 pixels of the reading line
                     if (tag_draw_y - guide_y).abs() < 80.0 {
                         slide_alert_to_trigger = Some(slide_num);
                     }
@@ -1351,7 +1539,7 @@ impl TeleprompterApp {
                 continue;
             }
 
-            // Layout the line/paragraph using the correct format, bold parser, and alignment (v1.1.2)
+            // Layout the line/paragraph using the correct format, bold parser, and alignment
             let mut job = parse_formatted_line(
                 trimmed,
                 self.font_size,
@@ -1467,12 +1655,7 @@ impl TeleprompterApp {
                 rect.left_top(),
                 egui::Pos2::new(rect.max.x, rect.min.y + fade_height),
             );
-            let fade_color = if self.transparent_background {
-                egui::Color32::TRANSPARENT
-            } else {
-                self.bg_color
-            };
-            self.draw_fade_gradient(ui.painter(), top_rect, fade_color, true);
+            self.draw_fade_gradient(ui.painter(), top_rect, self.bg_color, true);
 
             // Bottom fade rect
             let bottom_rect = egui::Rect::from_min_max(
@@ -1484,6 +1667,18 @@ impl TeleprompterApp {
 
         // 4. Draw Presenter Guide HUD (Left/Right panels in margins)
         let has_room_for_hud = padding >= 150.0;
+        
+        // Calculate Pace Estimator values
+        let total_chars = self.text.chars().count();
+        let cpm = if self.max_scroll > 0.0 && total_chars > 0 {
+            let chars_per_pixel = total_chars as f32 / self.max_scroll;
+            let chars_per_sec = self.scroll_speed * chars_per_pixel;
+            (chars_per_sec * 60.0) as i32
+        } else {
+            0
+        };
+        let wpm = cpm / 5;
+
         if self.show_hud && has_room_for_hud && self.countdown_secs <= 0.0 {
             let hud_text_color = if self.bg_color == egui::Color32::WHITE && !self.transparent_background {
                 egui::Color32::DARK_GRAY
@@ -1567,15 +1762,6 @@ impl TeleprompterApp {
             let right_panel_y = rect.min.y + 50.0;
 
             // 1. Pace Estimator (CPM / WPM)
-            let total_chars = self.text.chars().count();
-            let cpm = if self.max_scroll > 0.0 && total_chars > 0 {
-                let chars_per_pixel = total_chars as f32 / self.max_scroll;
-                let chars_per_sec = self.scroll_speed * chars_per_pixel;
-                (chars_per_sec * 60.0) as i32
-            } else {
-                0
-            };
-            let wpm = cpm / 5;
             let pace_str = format!("⚡ Pace: {} CPM\n          {} WPM", cpm, wpm);
             let font_pace = egui::FontId::new(13.0, egui::FontFamily::Proportional);
             let pace_galley = ui.fonts(|f| f.layout(pace_str, font_pace, hud_text_color, padding - 45.0));
@@ -1806,7 +1992,7 @@ impl TeleprompterApp {
                                         if self.enable_focus_mode { "ON" } else { "OFF" }
                                     ));
                                 });
-                                // Display helper tip when mouse click-through is enabled (v1.1.2)
+                                // Display helper tip when mouse click-through is enabled
                                 if self.mouse_passthrough {
                                     ui.add_space(4.0);
                                     let tr_tip = self.tr("sc_passthrough_tip");
@@ -1819,6 +2005,238 @@ impl TeleprompterApp {
     }
 }
 
+// HTTP Connection Client Handler
+fn handle_client(mut stream: TcpStream, state: Arc<Mutex<SharedRemoteState>>) {
+    let mut buffer = [0; 2048];
+    if stream.read(&mut buffer).is_err() {
+        return;
+    }
+    let req = String::from_utf8_lossy(&buffer);
+
+    // Endpoint 1: GET /api/status -> return JSON string representing status
+    if req.starts_with("GET /api/status") {
+        let json = {
+            let s = state.lock().unwrap();
+            let sections_json = s.sections.iter()
+                .map(|name| format!("\"{}\"", name.replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{{\"is_playing\":{},\"scroll_speed\":{:.1},\"scroll_y\":{:.1},\"max_scroll\":{:.1},\"elapsed_secs\":{:.1},\"remaining_secs\":{:.1},\"active_section_idx\":{},\"sections\":[{}]}}",
+                s.is_playing,
+                s.scroll_speed,
+                s.scroll_y,
+                s.max_scroll,
+                s.elapsed_secs,
+                s.remaining_secs,
+                match s.active_section_idx {
+                    Some(idx) => idx.to_string(),
+                    None => "null".to_string(),
+                },
+                sections_json
+            )
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        let _ = stream.write_all(response.as_bytes());
+    } 
+    // Endpoint 2: GET /api/control?action=xxx -> push command action
+    else if req.starts_with("GET /api/control") {
+        let action = if let Some(pos) = req.find("action=") {
+            let start = pos + "action=".len();
+            let end = req[start..].find(' ').unwrap_or(req[start..].len());
+            req[start..start+end].trim().to_string()
+        } else {
+            "none".to_string()
+        };
+
+        if action != "none" {
+            let mut s = state.lock().unwrap();
+            s.command_queue.push(action);
+        }
+
+        let json = "{\"success\":true}";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        let _ = stream.write_all(response.as_bytes());
+    } 
+    // Endpoint 3: GET / or index.html -> serve HTML remote controller panel
+    else if req.starts_with("GET / ") || req.starts_with("GET /index.html") {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            REMOTE_HTML.len(),
+            REMOTE_HTML
+        );
+        let _ = stream.write_all(response.as_bytes());
+    } else {
+        // Fallback HTTP 404
+        let response = "HTTP/1.1 404 NOT FOUND\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+        let _ = stream.write_all(response.as_bytes());
+    }
+}
+
+// Global default Language Filter state (v1.1.3 key mapping fix)
+const KEY_LANG_FILTER_DEFAULT_STATE: LanguageFilter = LanguageFilter::All;
+
+// Embedded mobile remote controller HTML page (Tailwind CSS based, fully responsive dark theme)
+const REMOTE_HTML: &str = r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Sisyphus Remote Control</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .active-btn { background-color: #00838F; border-color: #00acc1; }
+        .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans flex flex-col min-h-screen select-none">
+    <!-- Header -->
+    <header class="w-full py-4 px-6 glass-panel flex items-center justify-between sticky top-0 z-50">
+        <h1 class="text-lg font-bold tracking-wider text-cyan-400">🚀 Sisyphus Remote</h1>
+        <div id="status-badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-gray-700 text-gray-300">DISCONNECTED</div>
+    </header>
+
+    <!-- Main Content Grid -->
+    <main class="flex-grow w-full max-w-md mx-auto p-4 space-y-4 flex flex-col justify-center">
+        <!-- Timer & Speed Display Card -->
+        <div class="glass-panel rounded-2xl p-5 grid grid-cols-2 gap-4 text-center shadow-lg">
+            <div class="border-r border-slate-800">
+                <p class="text-xs text-slate-400 uppercase tracking-widest mb-1">Timer</p>
+                <p id="timer" class="text-2xl font-bold text-cyan-300">00:00</p>
+            </div>
+            <div>
+                <p class="text-xs text-slate-400 uppercase tracking-widest mb-1">Speed</p>
+                <p id="speed" class="text-2xl font-bold text-cyan-300">-- px/s</p>
+            </div>
+        </div>
+
+        <!-- Major Play/Pause Panel -->
+        <div class="flex justify-center py-4">
+            <button id="btn-toggle" class="w-40 h-40 rounded-full flex flex-col items-center justify-center font-bold text-lg border-4 border-slate-700 bg-slate-800 text-slate-200 transition-all active:scale-95 shadow-xl">
+                <span id="play-icon" class="text-4xl mb-1">▶</span>
+                <span id="play-text">PLAY</span>
+            </button>
+        </div>
+
+        <!-- Micro Adjustments Control Grid -->
+        <div class="grid grid-cols-2 gap-4">
+            <button onclick="control('speed_up')" class="glass-panel py-4 rounded-xl text-center font-semibold active:bg-cyan-900 active:scale-95 transition-all shadow-md">
+                ➕ Speed Up
+            </button>
+            <button onclick="control('speed_down')" class="glass-panel py-4 rounded-xl text-center font-semibold active:bg-cyan-900 active:scale-95 transition-all shadow-md">
+                ➖ Speed Down
+            </button>
+            <button onclick="control('page_up')" class="glass-panel py-4 rounded-xl text-center font-semibold active:bg-cyan-900 active:scale-95 transition-all shadow-md">
+                ⏮ Scroll Up
+            </button>
+            <button onclick="control('page_down')" class="glass-panel py-4 rounded-xl text-center font-semibold active:bg-cyan-900 active:scale-95 transition-all shadow-md">
+                ⏭ Scroll Down
+            </button>
+        </div>
+
+        <button onclick="control('reset')" class="w-full py-4 bg-red-950 border border-red-800 rounded-xl font-bold text-red-200 active:bg-red-900 active:scale-95 transition-all shadow-lg">
+            🔄 Reset Prompter & Timer
+        </button>
+
+        <!-- Chapter Jump List Card -->
+        <div class="glass-panel rounded-2xl p-5 space-y-3 flex-grow">
+            <h2 class="text-sm font-semibold uppercase tracking-wider text-slate-400">Chapters & Sections</h2>
+            <div id="section-list" class="space-y-2 max-h-48 overflow-y-auto pr-1">
+                <!-- Spanned dynamically -->
+            </div>
+        </div>
+    </main>
+
+    <!-- Script JS -->
+    <script>
+        const btnToggle = document.getElementById('btn-toggle');
+        const playIcon = document.getElementById('play-icon');
+        const playText = document.getElementById('play-text');
+        const statusBadge = document.getElementById('status-badge');
+        const txtTimer = document.getElementById('timer');
+        const txtSpeed = document.getElementById('speed');
+        const listSection = document.getElementById('section-list');
+
+        let sections = [];
+        let activeIdx = null;
+
+        btnToggle.addEventListener('click', () => {
+            control('toggle');
+        });
+
+        function control(action) {
+            fetch(`/api/control?action=${action}`)
+                .then(res => res.json())
+                .catch(err => console.error(err));
+        }
+
+        function poll() {
+            fetch('/api/status')
+                .then(res => res.json())
+                .then(data => {
+                    // Update connection state
+                    statusBadge.innerText = data.is_playing ? 'PLAYING' : 'PAUSED';
+                    statusBadge.className = `px-3 py-1 rounded-full text-xs font-semibold ${data.is_playing ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-amber-950 text-amber-300 border border-amber-800'}`;
+
+                    // Update toggler button state
+                    if (data.is_playing) {
+                        playIcon.innerText = '⏸';
+                        playText.innerText = 'PAUSE';
+                        btnToggle.className = "w-40 h-40 rounded-full flex flex-col items-center justify-center font-bold text-lg border-4 border-emerald-500 bg-emerald-900 text-white transition-all active:scale-95 shadow-xl";
+                    } else {
+                        playIcon.innerText = '▶';
+                        playText.innerText = 'PLAY';
+                        btnToggle.className = "w-40 h-40 rounded-full flex flex-col items-center justify-center font-bold text-lg border-4 border-slate-700 bg-slate-800 text-slate-200 transition-all active:scale-95 shadow-xl";
+                    }
+
+                    // Update speed and timer
+                    txtSpeed.innerText = `${data.scroll_speed} px/s`;
+                    
+                    const m = Math.floor(data.remaining_secs / 60);
+                    const s = Math.floor(data.remaining_secs % 60);
+                    txtTimer.innerText = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+
+                    // Populate and update chapter list if changed
+                    if (JSON.stringify(sections) !== JSON.stringify(data.sections) || activeIdx !== data.active_section_idx) {
+                        sections = data.sections;
+                        activeIdx = data.active_section_idx;
+                        renderSections();
+                    }
+                })
+                .catch(() => {
+                    statusBadge.innerText = 'DISCONNECTED';
+                    statusBadge.className = 'px-3 py-1 rounded-full text-xs font-semibold bg-red-950 text-red-300 border border-red-800';
+                });
+        }
+
+        function renderSections() {
+            listSection.innerHTML = '';
+            sections.forEach((name, idx) => {
+                const isActive = idx === activeIdx;
+                const div = document.createElement('div');
+                div.className = `w-full py-3 px-4 rounded-xl flex items-center justify-between transition-all active:scale-[0.98] ${isActive ? 'bg-cyan-950 border border-cyan-700 text-white font-semibold' : 'bg-slate-900 border border-slate-800 text-slate-300'}`;
+                div.innerHTML = `<span>${name}</span><span>${isActive ? '👉' : ''}</span>`;
+                div.onclick = () => control(`jump:${idx}`);
+                listSection.appendChild(div);
+            });
+        }
+
+        // Poll every 400ms
+        setInterval(poll, 400);
+        poll();
+    </script>
+</body>
+</html>
+"#;
+
 const DEFAULT_TEXT: &str = r#"=== PAGE 1: Opening & Hardware Product Definition ===
 [speed: 65]
 [slide: PAGE 1]
@@ -1826,7 +2244,7 @@ const DEFAULT_TEXT: &str = r#"=== PAGE 1: Opening & Hardware Product Definition 
 [中文]
 各位评委老师，早上好。我是陶鑫旺。正如我作品集第一页所示，我将自己定位为**机器人系统研发工程师**与**工业AI全栈实践者**。我始终致力于打破代码与物理世界之间的边界。
 
-我的第一个核心成果在于**硬件产品定义**。在李泽湘教授指导的InnoX创业营期间——您可以在图1中看到我们的路演合影——我主导了智能硬件Lumina从0到1 of 开发。针对年轻人因高功能焦虑引起的‘决策瘫痪’，我们创新地设计了**‘配重转子动态阻尼扭矩反馈’**的物理机制，将心理学机制具象化地实现在物理世界中。
+我的第一个核心成果在于**硬件产品定义**。在李泽湘教授指导的InnoX创业营期间——您可以在图1中看到我们的路演合影——我主导了智能硬件Lumina从0到1的开发。针对年轻人因高功能焦虑引起的‘决策瘫痪’，我们创新地设计了**‘配重转子动态阻尼扭矩反馈’**的物理机制，将心理学机制具象化地实现在物理世界中。
 
 [English]
 Good morning, respected judges. I am Xinwang Tao. As shown on the first page of my portfolio, I position myself as a **Robotics System R&D Engineer** and an **Industrial AI Full-Stack Practitioner**. I am always driven to break the boundaries between code and the physical world.
