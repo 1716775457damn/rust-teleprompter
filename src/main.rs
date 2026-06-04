@@ -136,6 +136,9 @@ struct AppConfig {
     timer_limit_minutes: f32,
     target_duration_minutes: f32,
     window_opacity: f32,
+    // Upgrades (v1.1.0):
+    countdown_duration_secs: f32,
+    enable_slide_alerts: bool,
 }
 
 impl Default for AppConfig {
@@ -158,6 +161,8 @@ impl Default for AppConfig {
             timer_limit_minutes: 4.5,
             target_duration_minutes: 4.5,
             window_opacity: 1.0,
+            countdown_duration_secs: 3.0,
+            enable_slide_alerts: true,
         }
     }
 }
@@ -197,7 +202,7 @@ struct TeleprompterApp {
     last_update: Instant,
     last_action_time: Instant, // For auto-hiding prompt info
     text_width_pct: f32, // Margins / width control (0.4 to 0.95 of screen)
-    countdown_secs: f32, // Preparation countdown (e.g. 3.0s)
+    countdown_secs: f32, // Preparation countdown
     show_edge_fade: bool, // Top and bottom gradient fades
     line_spacing: f32, // Line height multiplier (1.0 to 2.5)
     sections: Vec<SectionInfo>, // Struct containing header, Y offset, parsed speed, and cues
@@ -226,6 +231,11 @@ struct TeleprompterApp {
     // Iteration Upgrades (v1.0.9):
     window_opacity: f32, // Glass/overlay transparency (0.1 to 1.0)
     last_active_sec_idx: Option<usize>, // Track transition between sections to trigger autocompleted events
+
+    // Iteration Upgrades (v1.1.0):
+    countdown_duration_secs: f32, // User configurable countdown duration (1s to 10s)
+    enable_slide_alerts: bool, // Toggle flashing slide prompts
+    active_slide_alert: Option<String>, // Stores slide number to flash (e.g. "PAGE 3")
 }
 
 fn load_initial_text() -> String {
@@ -290,6 +300,10 @@ impl Default for TeleprompterApp {
 
             window_opacity: config.window_opacity,
             last_active_sec_idx: None,
+
+            countdown_duration_secs: config.countdown_duration_secs,
+            enable_slide_alerts: config.enable_slide_alerts,
+            active_slide_alert: None,
         };
         app.apply_color_preset();
         app
@@ -340,10 +354,17 @@ impl TeleprompterApp {
                 "target_duration" => "🎯 演讲目标时长 (分钟):",
                 "calibrate_btn" => "🧮 根据目标时长自动对齐滚速",
                 "fullscreen_hint" => "• F11 / F 键：切换全屏模式 (Fullscreen)",
-                
-                // v1.0.9 keys:
                 "window_opacity" => "🪟 玻璃悬浮窗不透明度 (Opacity):",
                 "cue_title" => "💡 演示提示 (Presenter Cue):",
+                
+                // v1.1.0 keys:
+                "countdown_duration" => "⏲️ 准备倒计时时长 (秒):",
+                "enable_slide_alerts" => "📢 开启幻灯片物理翻页强提醒",
+                "slide_alert_banner" => "👉 请将 PPT 翻页至：",
+                "stats_title" => "📊 演讲稿分析统计",
+                "stats_chars" => "• 字符数(含标点):",
+                "stats_words" => "• 英文单词数:",
+                "stats_time" => "• 预计阅读时长(按当前速度):",
                 _ => "",
             },
             UiLanguage::English => match key {
@@ -386,10 +407,17 @@ impl TeleprompterApp {
                 "target_duration" => "🎯 Target Duration (Minutes):",
                 "calibrate_btn" => "🧮 Align Scroll Speed to Target",
                 "fullscreen_hint" => "• F11 / F Key: Toggle borderless Fullscreen",
-                
-                // v1.0.9 keys:
                 "window_opacity" => "🪟 Window Glass Opacity:",
                 "cue_title" => "💡 Presenter Cue:",
+                
+                // v1.1.0 keys:
+                "countdown_duration" => "⏲️ Countdown Duration (s):",
+                "enable_slide_alerts" => "📢 Enable Slide Flip Alert Badges",
+                "slide_alert_banner" => "👉 FLIP TO SLIDE:",
+                "stats_title" => "📊 Script Analysis & Metrics",
+                "stats_chars" => "• Total Characters:",
+                "stats_words" => "• English Word Count:",
+                "stats_time" => "• Est. Reading Time (at current speed):",
                 _ => "",
             }
         }
@@ -494,6 +522,8 @@ impl TeleprompterApp {
             timer_limit_minutes: self.timer_limit_minutes,
             target_duration_minutes: self.target_duration_minutes,
             window_opacity: self.window_opacity,
+            countdown_duration_secs: self.countdown_duration_secs,
+            enable_slide_alerts: self.enable_slide_alerts,
         };
         save_config(&config);
     }
@@ -660,6 +690,8 @@ impl TeleprompterApp {
         let old_timer_limit_minutes = self.timer_limit_minutes;
         let old_target_duration_minutes = self.target_duration_minutes;
         let old_window_opacity = self.window_opacity;
+        let old_countdown_duration_secs = self.countdown_duration_secs;
+        let old_enable_slide_alerts = self.enable_slide_alerts;
 
         // Evaluate all translation keys FIRST to prevent immutable-mutable borrow conflicts on self
         let tr_title = self.tr("title");
@@ -696,11 +728,29 @@ impl TeleprompterApp {
         let sc_m = self.tr("sc_m");
         let sc_g = self.tr("sc_g");
 
-        // v1.0.8 & v1.0.9 translations
+        // v1.0.8, v1.0.9 & v1.1.0 translations
         let tr_target_duration = self.tr("target_duration");
         let tr_calibrate_btn = self.tr("calibrate_btn");
         let tr_fullscreen_hint = self.tr("fullscreen_hint");
         let tr_window_opacity = self.tr("window_opacity");
+        let tr_countdown_duration = self.tr("countdown_duration");
+        let tr_enable_slide_alerts = self.tr("enable_slide_alerts");
+        let tr_stats_title = self.tr("stats_title");
+        let tr_stats_chars = self.tr("stats_chars");
+        let tr_stats_words = self.tr("stats_words");
+        let tr_stats_time = self.tr("stats_time");
+
+        // Calculate Text Statistics
+        let char_count = self.text.chars().count();
+        let word_count = self.text.split_whitespace().filter(|w| w.chars().any(|c| c.is_alphabetic())).count();
+        let est_minutes = if self.scroll_speed > 0.0 {
+            let total_seconds = self.max_scroll / self.scroll_speed;
+            let m = (total_seconds / 60.0) as i32;
+            let s = (total_seconds % 60.0) as i32;
+            format!("{:02}:{:02}", m, s)
+        } else {
+            "--:--".to_string()
+        };
 
         ui.vertical(|ui| {
             // Header bar
@@ -712,12 +762,13 @@ impl TeleprompterApp {
                         self.mode = AppMode::Prompter;
                         self.scroll_y = 0.0;
                         self.target_scroll_y = 0.0;
-                        self.countdown_secs = 3.0; // 3 seconds count down
+                        self.countdown_secs = self.countdown_duration_secs;
                         self.is_playing = false;
                         self.elapsed_secs = 0.0;
                         self.remaining_limit_secs = self.timer_limit_minutes * 60.0;
                         self.fullscreen = false;
                         self.last_active_sec_idx = None;
+                        self.active_slide_alert = None;
                         self.record_action();
                         self.last_update = Instant::now();
                     }
@@ -747,11 +798,22 @@ impl TeleprompterApp {
                         ui.checkbox(&mut self.always_on_top, tr_always_on_top);
                         ui.add_space(6.0);
 
-                        // Window glass opacity/transparency (v1.0.9)
+                        // Window glass opacity/transparency
                         ui.horizontal(|ui| {
                             ui.label(tr_window_opacity);
                             ui.add(egui::Slider::new(&mut self.window_opacity, 0.1..=1.0).suffix(" x"));
                         });
+                        ui.add_space(6.0);
+
+                        // Countdown duration adjust (v1.1.0)
+                        ui.horizontal(|ui| {
+                            ui.label(tr_countdown_duration);
+                            ui.add(egui::Slider::new(&mut self.countdown_duration_secs, 1.0..=10.0).suffix(" s"));
+                        });
+                        ui.add_space(6.0);
+
+                        // Slide Flip alerts toggle (v1.1.0)
+                        ui.checkbox(&mut self.enable_slide_alerts, tr_enable_slide_alerts);
                         ui.add_space(6.0);
 
                         // Timer configurations
@@ -878,6 +940,16 @@ impl TeleprompterApp {
                         });
                     });
 
+                    // Text Script Stats Box (v1.1.0)
+                    ui.add_space(10.0);
+                    ui.group(|ui| {
+                        ui.heading(tr_stats_title);
+                        ui.add_space(5.0);
+                        ui.label(format!("{} {}", tr_stats_chars, char_count));
+                        ui.label(format!("{} {}", tr_stats_words, word_count));
+                        ui.label(format!("{} {}", tr_stats_time, est_minutes));
+                    });
+
                     ui.add_space(15.0);
                     ui.group(|ui| {
                         ui.heading(tr_shortcuts);
@@ -946,6 +1018,8 @@ impl TeleprompterApp {
             || old_timer_limit_minutes != self.timer_limit_minutes
             || old_target_duration_minutes != self.target_duration_minutes
             || old_window_opacity != self.window_opacity
+            || old_countdown_duration_secs != self.countdown_duration_secs
+            || old_enable_slide_alerts != self.enable_slide_alerts
         {
             self.save_settings();
         }
@@ -1005,7 +1079,7 @@ impl TeleprompterApp {
             self.countdown_secs = 0.0;
             self.elapsed_secs = 0.0;
             self.remaining_limit_secs = self.timer_limit_minutes * 60.0;
-            self.last_active_sec_idx = None;
+            self.active_slide_alert = None;
             self.record_action();
             ctx.request_repaint();
         }
@@ -1087,6 +1161,8 @@ impl TeleprompterApp {
         // Tracks stateful language blocks in parsing
         let mut current_block_lang = LanguageFilter::All;
         let bold_highlight_color = egui::Color32::from_rgb(255, 179, 0); // Amber/orange for bold text emphasis
+        
+        let mut slide_alert_to_trigger = None;
 
         for line in self.text.lines() {
             let trimmed = line.trim();
@@ -1125,11 +1201,12 @@ impl TeleprompterApp {
                 0.0
             };
 
-            // Parse Section Speed and Cue tags (v1.0.9)
-            // Example: [speed: 75] or [cue: Make eye contact]
+            // Parse Section Speed, Cue, and Slide tags
+            // Example: [speed: 75], [cue: Make eye contact], [slide: Page 2]
             let is_tag = trimmed.starts_with("[") && trimmed.ends_with("]");
             let mut is_speed_tag = false;
             let mut is_cue_tag = false;
+            let mut is_slide_tag = false;
 
             if is_tag {
                 let inner = &trimmed[1..trimmed.len() - 1];
@@ -1146,11 +1223,21 @@ impl TeleprompterApp {
                     if let Some(current_sec) = temp_sections.last_mut() {
                         current_sec.cues.push(cue_text);
                     }
+                } else if inner.starts_with("slide:") {
+                    is_slide_tag = true;
+                    let slide_num = inner["slide:".len()..].trim().to_string();
+                    
+                    // We check if this slide tag is near the reading guide line (active line trigger)
+                    let tag_draw_y = start_y + current_y - self.scroll_y;
+                    // Trigger alert when the slide tag line is within +/- 100 pixels of the reading line
+                    if (tag_draw_y - guide_y).abs() < 80.0 {
+                        slide_alert_to_trigger = Some(slide_num);
+                    }
                 }
             }
 
-            // Do not render speed and cue tags in the scrolling viewport
-            if is_speed_tag || is_cue_tag {
+            // Do not render speed, cue, or slide tags in the scrolling viewport
+            if is_speed_tag || is_cue_tag || is_slide_tag {
                 continue;
             }
 
@@ -1203,6 +1290,9 @@ impl TeleprompterApp {
         self.sections = temp_sections;
         self.max_scroll = (current_y - height + guide_y + 100.0).max(0.0);
 
+        // Assign current active slide flip alert badge (v1.1.0)
+        self.active_slide_alert = slide_alert_to_trigger;
+
         // Calculate active section index
         let mut active_sec_idx = None;
         for (idx, sec) in self.sections.iter().enumerate() {
@@ -1211,7 +1301,7 @@ impl TeleprompterApp {
             }
         }
 
-        // Trigger transition-based speed adjustments (v1.0.9)
+        // Trigger transition-based speed adjustments
         if active_sec_idx != self.last_active_sec_idx {
             self.last_active_sec_idx = active_sec_idx;
             if let Some(idx) = active_sec_idx {
@@ -1284,7 +1374,7 @@ impl TeleprompterApp {
             } else {
                 egui::Color32::from_rgb(176, 190, 197) // Clean secondary grey
             };
-            let cyan_accent = egui::Color32::from_rgb(0, 188, 212);
+            let cyan_accent = egui::Color32::from_rgb(0, 151, 167);
 
             // LEFT PANEL: Dynamic Timer & Mini Table of Contents
             let left_panel_x = rect.min.x + 20.0;
@@ -1467,6 +1557,46 @@ impl TeleprompterApp {
             }
         }
 
+        // Draw Flashing Slide Flip Alert Badge (v1.1.0)
+        if self.enable_slide_alerts {
+            if let Some(ref slide_info) = self.active_slide_alert {
+                // Flash alert (alternate opacity using elapsed time sine wave)
+                let elapsed_factor = (self.elapsed_secs * 6.0).sin().abs();
+                let alpha = (120.0 + elapsed_factor * 110.0) as u8; // Pulsing opacity [120, 230]
+                
+                let card_color = egui::Color32::from_rgba_unmultiplied(229, 57, 53, alpha); // Pulsing Red Card
+                let text_banner = self.tr("slide_alert_banner");
+                let alert_str = format!("🚨 {} {} 🚨", text_banner, slide_info);
+                
+                let font_alert = egui::FontId::new(20.0, egui::FontFamily::Proportional);
+                let alert_galley = ui.fonts(|f| f.layout(alert_str, font_alert, egui::Color32::WHITE, width - 200.0));
+                let alert_width = alert_galley.rect.width();
+                
+                let x_pos = center_x - (alert_width / 2.0);
+                let y_pos = rect.max.y - 100.0; // Positioned near bottom center
+                
+                let alert_rect = egui::Rect::from_min_max(
+                    egui::Pos2::new(x_pos - 20.0, y_pos - 8.0),
+                    egui::Pos2::new(x_pos + alert_width + 20.0, y_pos + alert_galley.rect.height() + 8.0),
+                );
+                
+                self.paint_shape(
+                    ctx,
+                    ui.painter(),
+                    ui.clip_rect(),
+                    egui::Shape::rect_filled(alert_rect, 8.0, card_color),
+                    center_x,
+                );
+                self.paint_shape(
+                    ctx,
+                    ui.painter(),
+                    ui.clip_rect(),
+                    egui::Shape::galley(egui::Pos2::new(x_pos, y_pos), alert_galley, egui::Color32::WHITE),
+                    center_x,
+                );
+            }
+        }
+
         // 5. Draw Scrolling Progress Bar (Cyan thin line at the top)
         if self.max_scroll > 0.0 {
             let progress = (self.scroll_y / self.max_scroll).clamp(0.0, 1.0);
@@ -1566,6 +1696,7 @@ impl TeleprompterApp {
 
 const DEFAULT_TEXT: &str = r#"=== PAGE 1: Opening & Hardware Product Definition ===
 [speed: 65]
+[slide: PAGE 1]
 [cue: 动作：微笑致意，保持眼神交流]
 [中文]
 各位评委老师，早上好。我是陶鑫旺。正如我作品集第一页所示，我将自己定位为**机器人系统研发工程师**与**工业AI全栈实践者**。我始终致力于打破代码与物理世界之间的边界。
@@ -1579,6 +1710,7 @@ My first core achievement lies in **hardware product definition**. During the In
 
 === PAGE 2: Commercial Updates & Achievement 2: Industrial AI ===
 [speed: 70]
+[slide: PAGE 2]
 [cue: 动作：指向图2 Demo，展现商业野心]
 [中文]
 请翻到第2页。在产品落地阶段，如顶部图2所示，通过持续、高强度的MVP快速迭代，我们成功打磨出了一款高度精致的产品Demo。
@@ -1596,6 +1728,7 @@ Beyond agile hardware development, my second core achievement is the **full-stac
 
 === PAGE 3: Achievement 3: Systems Engineering & Commercialization ===
 [speed: 60]
+[slide: PAGE 3]
 [cue: 动作：加重语气，介绍云影智巡CTO成果]
 [中文]
 请翻到第3页。我的第三个核心成果是大型系统的商业化运营。作为科技初创企业‘云影智巡’的CTO，我全面领导了机器人技术（包括教育无人机和仿生扑翼微型飞行器）的全栈研发。
@@ -1609,6 +1742,7 @@ Fig. 4 on the left displays the hardcore iterative process of our multi-generati
 
 === PAGE 4: Commercial Validation & IP Moat ===
 [speed: 65]
+[slide: PAGE 4]
 [cue: 动作：展示互联网+银奖与股交所挂牌证书]
 [中文]
 第4页展示了我们的商业验证与技术护城河。图6来自于我们在‘互联网+’大赛中荣获国家级银奖的颁奖现场。图7是我们公司在湖南股权交易所成功挂牌的证书。
@@ -1622,6 +1756,7 @@ To build technical barriers, as shown in Fig. 8 in the middle, I accumulated **o
 
 === PAGE 5: Achievement 4: Academic Research & Theory ===
 [speed: 55]
+[slide: PAGE 5]
 [cue: 动作：指向学术论文，语调保持沉稳、严谨]
 [中文]
 工程痛点反向驱动了我对学术界的深耕。请看包含我第四个成果的第5页。
@@ -1635,6 +1770,7 @@ Fig. 12 on the bottom left is my research on a bionic UAV spatial linkage mechan
 
 === PAGE 6: Full-Stack Skill Tree & Vision ===
 [speed: 70]
+[slide: PAGE 6]
 [cue: 动作：眼神交流，自信有力地收尾]
 [中文]
 最后，请看第6页。顶部区域总结了我的全栈技能树。从熟练使用Cursor等AI工具构建自动化工作流，到将边缘计算底层彻底从C++重构为性能更高的Rust语言并部署在ESP32-S3微控制器上——我正不断且敏捷地迭代我的技术边界。
