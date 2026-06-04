@@ -97,12 +97,36 @@ fn setup_custom_fonts(ctx: &egui::Context) {
 
 // Configures a highly polished, modern dark theme with elegant cyan accents
 fn configure_dark_theme(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    
+    // Refined, spacious margins and items padding
+    style.spacing.item_spacing = egui::vec2(12.0, 10.0);
+    style.spacing.button_padding = egui::vec2(16.0, 8.0);
+    style.spacing.slider_width = 160.0;
+    
     let mut visuals = egui::Visuals::dark();
-    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0, 151, 167); // Cyan
-    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0, 188, 212); // Light Cyan
-    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(33, 33, 33);
-    visuals.selection.bg_fill = egui::Color32::from_rgb(0, 188, 212);
-    visuals.window_rounding = 8.0.into();
+    
+    // Premium Slate/GitHub-like dark background palette
+    visuals.panel_fill = egui::Color32::from_rgb(13, 17, 23); // Primary background
+    visuals.window_fill = egui::Color32::from_rgb(22, 27, 34); // Surface card color
+    
+    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(33, 38, 45);
+    visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_rgb(201, 209, 217);
+    visuals.widgets.inactive.rounding = 6.0.into();
+    visuals.widgets.inactive.expansion = 0.0;
+    
+    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(48, 54, 61);
+    visuals.widgets.hovered.fg_stroke.color = egui::Color32::from_rgb(240, 246, 252);
+    visuals.widgets.hovered.rounding = 6.0.into();
+    
+    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0, 151, 167); // Cyan Active
+    visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
+    visuals.widgets.active.rounding = 6.0.into();
+    
+    visuals.selection.bg_fill = egui::Color32::from_rgb(0, 151, 167);
+    visuals.window_rounding = 10.0.into();
+    
+    ctx.set_style(style);
     ctx.set_visuals(visuals);
 }
 
@@ -225,7 +249,7 @@ struct AppConfig {
     #[serde(default)]
     text_align: TextAlignment,
     #[serde(default = "default_true")]
-    enable_web_remote: bool, // Toggle server integration
+    enable_web_remote: bool,
 }
 
 fn default_true() -> bool {
@@ -442,7 +466,7 @@ impl TeleprompterApp {
     fn tr(&self, key: &str) -> &'static str {
         match self.ui_language {
             UiLanguage::Chinese => match key {
-                "title" => "🚀 Sisyphus 专业级智能提词器",
+                "title" => "🚀 Sisyphus 专业智能提词器",
                 "start_prompter" => "⚡ 启动提词器 (空格键)",
                 "settings" => "🎛️ 设置面板",
                 "font_size" => "字体大小:",
@@ -1041,226 +1065,295 @@ impl TeleprompterApp {
 
             // Two-column layout: Left (Controls), Right (Text input)
             ui.columns(2, |columns| {
-                // Column 0: Controls
+                // Column 0: Controls (Refined visual style with custom frames)
                 columns[0].vertical(|ui| {
-                    ui.group(|ui| {
-                        ui.heading(tr_settings);
-                        ui.add_space(10.0);
+                    // Frame 1: Core System & Window Controls
+                    egui::Frame::none()
+                        .fill(ui.style().visuals.window_fill())
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10)))
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::same(12.0))
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.heading(tr_settings);
+                                ui.add_space(6.0);
 
-                        // UI Language Toggle Buttons
-                        ui.horizontal(|ui| {
-                            ui.label(tr_ui_lang);
-                            ui.selectable_value(&mut self.ui_language, UiLanguage::Chinese, "中文");
-                            ui.selectable_value(&mut self.ui_language, UiLanguage::English, "English");
-                        });
-                        ui.add_space(8.0);
-
-                        // Window always on top checkbox
-                        ui.checkbox(&mut self.always_on_top, tr_always_on_top);
-                        ui.add_space(6.0);
-
-                        // Mouse passthrough click-through toggle
-                        ui.checkbox(&mut self.mouse_passthrough, tr_mouse_passthrough);
-                        ui.add_space(6.0);
-
-                        // Pure Transparent Background checkbox
-                        ui.checkbox(&mut self.transparent_background, tr_transparent_background);
-                        ui.add_space(6.0);
-
-                        // Window glass opacity/transparency slider (only enabled if not fully transparent)
-                        if !self.transparent_background {
-                            ui.horizontal(|ui| {
-                                ui.label(tr_window_opacity);
-                                ui.add(egui::Slider::new(&mut self.window_opacity, 0.1..=1.0).suffix(" x"));
-                            });
-                            ui.add_space(6.0);
-                        }
-
-                        // Text Alignment Selector (v1.1.2)
-                        ui.horizontal(|ui| {
-                            ui.label(tr_text_align);
-                            ui.selectable_value(&mut self.text_align, TextAlignment::Left, tr_align_left);
-                            ui.selectable_value(&mut self.text_align, TextAlignment::Center, tr_align_center);
-                            ui.selectable_value(&mut self.text_align, TextAlignment::Right, tr_align_right);
-                        });
-                        ui.add_space(6.0);
-
-                        // Web mobile remote controller checkbox (v1.1.3)
-                        ui.checkbox(&mut self.enable_web_remote, tr_web_remote);
-                        if self.enable_web_remote {
-                            ui.add_space(2.0);
-                            ui.horizontal(|ui| {
-                                ui.label(tr_remote_url);
-                                ui.colored_label(egui::Color32::from_rgb(0, 188, 212), format!("http://{}:9090", self.local_ip));
-                            });
-                        }
-                        ui.add_space(8.0);
-
-                        ui.separator();
-                        ui.add_space(8.0);
-
-                        // Countdown duration adjust
-                        ui.horizontal(|ui| {
-                            ui.label(tr_countdown_duration);
-                            ui.add(egui::Slider::new(&mut self.countdown_duration_secs, 1.0..=10.0).suffix(" s"));
-                        });
-                        ui.add_space(6.0);
-
-                        // Slide Flip alerts toggle
-                        ui.checkbox(&mut self.enable_slide_alerts, tr_enable_slide_alerts);
-                        ui.add_space(6.0);
-
-                        // Timer configurations
-                        ui.checkbox(&mut self.enable_timer_limit, tr_timer_enable);
-                        if self.enable_timer_limit {
-                            ui.horizontal(|ui| {
-                                ui.label(tr_timer_limit);
-                                ui.add(egui::Slider::new(&mut self.timer_limit_minutes, 0.5..=15.0).suffix(" m"));
-                            });
-                        }
-                        ui.add_space(8.0);
-
-                        ui.separator();
-                        ui.add_space(8.0);
-
-                        // Target Duration speed calibrator
-                        ui.horizontal(|ui| {
-                            ui.label(tr_target_duration);
-                            ui.add(egui::Slider::new(&mut self.target_duration_minutes, 0.5..=10.0).suffix(" m"));
-                        });
-                        ui.add_space(4.0);
-                        if ui.button(tr_calibrate_btn).clicked() {
-                            self.calibrate_speed_to_target();
-                        }
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(8.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label(tr_font_size);
-                            ui.add(egui::Slider::new(&mut self.font_size, 16.0..=120.0).suffix(" px"));
-                        });
-                        ui.add_space(6.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label(tr_scroll_speed);
-                            ui.add(egui::Slider::new(&mut self.scroll_speed, 10.0..=500.0).suffix(" px/s"));
-                        });
-                        ui.add_space(6.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label(tr_line_height);
-                            ui.add(egui::Slider::new(&mut self.line_spacing, 1.0..=2.5).suffix(" x"));
-                        });
-                        ui.add_space(6.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label(tr_column_width);
-                            ui.add(egui::Slider::new(&mut self.text_width_pct, 0.4..=0.95).text("Width %"));
-                        });
-                        ui.add_space(6.0);
-
-                        ui.checkbox(&mut self.is_mirrored, tr_mirror);
-                        ui.checkbox(&mut self.show_guide, tr_guide);
-                        
-                        if self.show_guide {
-                            ui.horizontal(|ui| {
-                                ui.label(tr_guide_pos);
-                                ui.add(egui::Slider::new(&mut self.guide_y_pct, 0.1..=0.9));
-                            });
-                        }
-                        ui.add_space(6.0);
-
-                        ui.checkbox(&mut self.show_edge_fade, tr_edge_fade);
-                        ui.checkbox(&mut self.enable_focus_mode, tr_focus_mode);
-                        ui.checkbox(&mut self.show_hud, tr_show_hud);
-                        ui.add_space(6.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label(tr_lang_filter);
-                            egui::ComboBox::from_id_source("lang_filter_combo")
-                                .selected_text(match self.language_filter {
-                                    LanguageFilter::All => match self.ui_language {
-                                        UiLanguage::Chinese => "全部显示 (中英文)",
-                                        UiLanguage::English => "Show All (CN & EN)",
-                                    },
-                                    LanguageFilter::ChineseOnly => match self.ui_language {
-                                        UiLanguage::Chinese => "仅中文",
-                                        UiLanguage::English => "Chinese Only (中文)",
-                                    },
-                                    LanguageFilter::EnglishOnly => match self.ui_language {
-                                        UiLanguage::Chinese => "仅英文 (English)",
-                                        UiLanguage::English => "English Only",
-                                    },
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut self.language_filter, LanguageFilter::All, match self.ui_language {
-                                        UiLanguage::Chinese => "全部显示 (中英文)",
-                                        UiLanguage::English => "Show All (CN & EN)",
-                                    });
-                                    ui.selectable_value(&mut self.language_filter, LanguageFilter::ChineseOnly, match self.ui_language {
-                                        UiLanguage::Chinese => "仅中文",
-                                        UiLanguage::English => "Chinese Only (中文)",
-                                    });
-                                    ui.selectable_value(&mut self.language_filter, LanguageFilter::EnglishOnly, match self.ui_language {
-                                        UiLanguage::Chinese => "仅英文 (English)",
-                                        UiLanguage::English => "English Only",
-                                    });
+                                // UI Language Toggle Buttons
+                                ui.horizontal(|ui| {
+                                    ui.label(tr_ui_lang);
+                                    ui.selectable_value(&mut self.ui_language, UiLanguage::Chinese, "中文");
+                                    ui.selectable_value(&mut self.ui_language, UiLanguage::English, "English");
                                 });
-                        });
-                        ui.add_space(6.0);
+                                ui.add_space(4.0);
 
-                        ui.horizontal(|ui| {
-                            ui.label(tr_color_preset);
-                            let prev_preset = self.color_preset;
-                            egui::ComboBox::from_id_source("color_preset_combo")
-                                .selected_text(match self.color_preset {
-                                    ColorPreset::WhiteOnBlack => "White text on Black",
-                                    ColorPreset::YellowOnBlack => "Yellow text on Black",
-                                    ColorPreset::GreenOnBlack => "Green text on Black",
-                                    ColorPreset::CyanOnBlack => "Cyan text on Black",
-                                    ColorPreset::BlackOnWhite => "Black text on White",
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut self.color_preset, ColorPreset::WhiteOnBlack, "White text on Black");
-                                    ui.selectable_value(&mut self.color_preset, ColorPreset::YellowOnBlack, "Yellow text on Black");
-                                    ui.selectable_value(&mut self.color_preset, ColorPreset::GreenOnBlack, "Green text on Black");
-                                    ui.selectable_value(&mut self.color_preset, ColorPreset::CyanOnBlack, "Cyan text on Black");
-                                    ui.selectable_value(&mut self.color_preset, ColorPreset::BlackOnWhite, "Black text on White");
+                                // Window always on top checkbox
+                                ui.checkbox(&mut self.always_on_top, tr_always_on_top);
+                                ui.add_space(4.0);
+
+                                // Mouse passthrough click-through toggle
+                                ui.checkbox(&mut self.mouse_passthrough, tr_mouse_passthrough);
+                                ui.add_space(4.0);
+
+                                // Pure Transparent Background checkbox
+                                ui.checkbox(&mut self.transparent_background, tr_transparent_background);
+                                ui.add_space(4.0);
+
+                                // Window glass opacity/transparency slider
+                                if !self.transparent_background {
+                                    ui.horizontal(|ui| {
+                                        ui.label(tr_window_opacity);
+                                        ui.add(egui::Slider::new(&mut self.window_opacity, 0.1..=1.0).suffix(" x"));
+                                    });
+                                    ui.add_space(4.0);
+                                }
+
+                                // Text Alignment Selector (v1.1.2)
+                                ui.horizontal(|ui| {
+                                    ui.label(tr_text_align);
+                                    ui.selectable_value(&mut self.text_align, TextAlignment::Left, tr_align_left);
+                                    ui.selectable_value(&mut self.text_align, TextAlignment::Center, tr_align_center);
+                                    ui.selectable_value(&mut self.text_align, TextAlignment::Right, tr_align_right);
                                 });
-                            if self.color_preset != prev_preset {
-                                self.apply_color_preset();
-                            }
+                            });
                         });
-                    });
 
-                    // Text Script Stats Box
-                    ui.add_space(10.0);
-                    ui.group(|ui| {
-                        ui.heading(tr_stats_title);
-                        ui.add_space(5.0);
-                        ui.label(format!("{} {}", tr_stats_chars, char_count));
-                        ui.label(format!("{} {}", tr_stats_words, word_count));
-                        ui.label(format!("{} {}", tr_stats_time, est_minutes));
-                    });
+                    // Frame 2: Web Remote Control (📱 Styled Server Card)
+                    ui.add_space(8.0);
+                    egui::Frame::none()
+                        .fill(ui.style().visuals.window_fill())
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10)))
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::same(12.0))
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.checkbox(&mut self.enable_web_remote, tr_web_remote);
+                                if self.enable_web_remote {
+                                    ui.add_space(4.0);
+                                    ui.horizontal(|ui| {
+                                        let pulse_color = if self.is_playing {
+                                            egui::Color32::from_rgb(76, 175, 80) // Green when rolling
+                                        } else {
+                                            egui::Color32::from_rgb(0, 188, 212) // Cyan
+                                        };
+                                        ui.label("• Status: ");
+                                        ui.colored_label(pulse_color, "ACTIVE SERVER");
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label(tr_remote_url);
+                                        ui.colored_label(egui::Color32::from_rgb(0, 188, 212), format!("http://{}:9090", self.local_ip));
+                                    });
+                                }
+                            });
+                        });
 
-                    ui.add_space(15.0);
-                    ui.group(|ui| {
-                        ui.heading(tr_shortcuts);
-                        ui.add_space(6.0);
-                        ui.label(sc_space);
-                        ui.label(sc_esc);
-                        ui.label(sc_arrows);
-                        ui.label(sc_scroll);
-                        ui.label(sc_num);
-                        ui.label(sc_l);
-                        ui.label(sc_h);
-                        ui.label(tr_fullscreen_hint);
-                        ui.label(sc_minus);
-                        ui.label(sc_r);
-                        ui.label(sc_m);
-                        ui.label(sc_g);
-                    });
+                    // Frame 3: Typography, Scroll Speed & Duration Calibration
+                    ui.add_space(8.0);
+                    egui::Frame::none()
+                        .fill(ui.style().visuals.window_fill())
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10)))
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::same(12.0))
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(tr_font_size);
+                                    ui.add(egui::Slider::new(&mut self.font_size, 16.0..=120.0).suffix(" px"));
+                                });
+                                ui.add_space(4.0);
+
+                                ui.horizontal(|ui| {
+                                    ui.label(tr_scroll_speed);
+                                    ui.add(egui::Slider::new(&mut self.scroll_speed, 10.0..=500.0).suffix(" px/s"));
+                                });
+                                ui.add_space(4.0);
+
+                                ui.horizontal(|ui| {
+                                    ui.label(tr_line_height);
+                                    ui.add(egui::Slider::new(&mut self.line_spacing, 1.0..=2.5).suffix(" x"));
+                                });
+                                ui.add_space(4.0);
+
+                                ui.horizontal(|ui| {
+                                    ui.label(tr_column_width);
+                                    ui.add(egui::Slider::new(&mut self.text_width_pct, 0.4..=0.95).text("Width %"));
+                                });
+                                ui.add_space(8.0);
+                                ui.separator();
+                                ui.add_space(8.0);
+
+                                // Target Duration speed calibrator
+                                ui.horizontal(|ui| {
+                                    ui.label(tr_target_duration);
+                                    ui.add(egui::Slider::new(&mut self.target_duration_minutes, 0.5..=10.0).suffix(" m"));
+                                });
+                                ui.add_space(6.0);
+                                if ui.button(tr_calibrate_btn).clicked() {
+                                    self.calibrate_speed_to_target();
+                                }
+                            });
+                        });
+
+                    // Frame 4: Timers & Presentation Cues configurations
+                    ui.add_space(8.0);
+                    egui::Frame::none()
+                        .fill(ui.style().visuals.window_fill())
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10)))
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::same(12.0))
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                // Countdown duration adjust
+                                ui.horizontal(|ui| {
+                                    ui.label(tr_countdown_duration);
+                                    ui.add(egui::Slider::new(&mut self.countdown_duration_secs, 1.0..=10.0).suffix(" s"));
+                                });
+                                ui.add_space(4.0);
+
+                                // Slide Flip alerts toggle
+                                ui.checkbox(&mut self.enable_slide_alerts, tr_enable_slide_alerts);
+                                ui.add_space(4.0);
+
+                                // Timer configurations
+                                ui.checkbox(&mut self.enable_timer_limit, tr_timer_enable);
+                                if self.enable_timer_limit {
+                                    ui.horizontal(|ui| {
+                                        ui.label(tr_timer_limit);
+                                        ui.add(egui::Slider::new(&mut self.timer_limit_minutes, 0.5..=15.0).suffix(" m"));
+                                    });
+                                }
+                            });
+                        });
+
+                    // Frame 5: Mirroring and Presentation overlays
+                    ui.add_space(8.0);
+                    egui::Frame::none()
+                        .fill(ui.style().visuals.window_fill())
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10)))
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::same(12.0))
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.checkbox(&mut self.is_mirrored, tr_mirror);
+                                ui.checkbox(&mut self.show_guide, tr_guide);
+                                
+                                if self.show_guide {
+                                    ui.horizontal(|ui| {
+                                        ui.label(tr_guide_pos);
+                                        ui.add(egui::Slider::new(&mut self.guide_y_pct, 0.1..=0.9));
+                                    });
+                                }
+                                ui.add_space(4.0);
+
+                                ui.checkbox(&mut self.show_edge_fade, tr_edge_fade);
+                                ui.checkbox(&mut self.enable_focus_mode, tr_focus_mode);
+                                ui.checkbox(&mut self.show_hud, tr_show_hud);
+                                ui.add_space(4.0);
+
+                                ui.horizontal(|ui| {
+                                    ui.label(tr_lang_filter);
+                                    egui::ComboBox::from_id_source("lang_filter_combo")
+                                        .selected_text(match self.language_filter {
+                                            LanguageFilter::All => match self.ui_language {
+                                                UiLanguage::Chinese => "全部显示 (中英文)",
+                                                UiLanguage::English => "Show All (CN & EN)",
+                                            },
+                                            LanguageFilter::ChineseOnly => match self.ui_language {
+                                                UiLanguage::Chinese => "仅中文",
+                                                UiLanguage::English => "Chinese Only (中文)",
+                                            },
+                                            LanguageFilter::EnglishOnly => match self.ui_language {
+                                                UiLanguage::Chinese => "仅英文 (English)",
+                                                UiLanguage::English => "English Only",
+                                            },
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut self.language_filter, LanguageFilter::All, match self.ui_language {
+                                                UiLanguage::Chinese => "全部显示 (中英文)",
+                                                UiLanguage::English => "Show All (CN & EN)",
+                                            });
+                                            ui.selectable_value(&mut self.language_filter, LanguageFilter::ChineseOnly, match self.ui_language {
+                                                UiLanguage::Chinese => "仅中文",
+                                                UiLanguage::English => "Chinese Only (中文)",
+                                            });
+                                            ui.selectable_value(&mut self.language_filter, LanguageFilter::EnglishOnly, match self.ui_language {
+                                                UiLanguage::Chinese => "仅英文 (English)",
+                                                UiLanguage::English => "English Only",
+                                            });
+                                        });
+                                });
+                                ui.add_space(4.0);
+
+                                ui.horizontal(|ui| {
+                                    ui.label(tr_color_preset);
+                                    let prev_preset = self.color_preset;
+                                    egui::ComboBox::from_id_source("color_preset_combo")
+                                        .selected_text(match self.color_preset {
+                                            ColorPreset::WhiteOnBlack => "White text on Black",
+                                            ColorPreset::YellowOnBlack => "Yellow text on Black",
+                                            ColorPreset::GreenOnBlack => "Green text on Black",
+                                            ColorPreset::CyanOnBlack => "Cyan text on Black",
+                                            ColorPreset::BlackOnWhite => "Black text on White",
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut self.color_preset, ColorPreset::WhiteOnBlack, "White text on Black");
+                                            ui.selectable_value(&mut self.color_preset, ColorPreset::YellowOnBlack, "Yellow text on Black");
+                                            ui.selectable_value(&mut self.color_preset, ColorPreset::GreenOnBlack, "Green text on Black");
+                                            ui.selectable_value(&mut self.color_preset, ColorPreset::CyanOnBlack, "Cyan text on Black");
+                                            ui.selectable_value(&mut self.color_preset, ColorPreset::BlackOnWhite, "Black text on White");
+                                        });
+                                    if self.color_preset != prev_preset {
+                                        self.apply_color_preset();
+                                    }
+                                });
+                            });
+                        });
+
+                    // Frame 6: Text Script Stats Card
+                    ui.add_space(8.0);
+                    egui::Frame::none()
+                        .fill(ui.style().visuals.window_fill())
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10)))
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::same(12.0))
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.heading(tr_stats_title);
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{} {}", tr_stats_chars, char_count));
+                                    ui.add_space(10.0);
+                                    ui.label(format!("{} {}", tr_stats_words, word_count));
+                                });
+                                ui.add_space(4.0);
+                                ui.label(format!("{} {}", tr_stats_time, est_minutes));
+                            });
+                        });
+
+                    // Frame 7: ShortCut Keys info
+                    ui.add_space(8.0);
+                    egui::Frame::none()
+                        .fill(ui.style().visuals.window_fill())
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10)))
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::same(12.0))
+                        .show(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.heading(tr_shortcuts);
+                                ui.add_space(6.0);
+                                ui.label(sc_space);
+                                ui.label(sc_esc);
+                                ui.label(sc_arrows);
+                                ui.label(sc_scroll);
+                                ui.label(sc_num);
+                                ui.label(sc_l);
+                                ui.label(sc_h);
+                                ui.label(tr_fullscreen_hint);
+                                ui.label(sc_minus);
+                                ui.label(sc_r);
+                                ui.label(sc_m);
+                                ui.label(sc_g);
+                            });
+                        });
                 });
 
                 // Column 1: Script Editor (Auto-saves changes, with template/clear buttons)
