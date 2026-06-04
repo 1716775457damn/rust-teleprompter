@@ -124,6 +124,7 @@ struct AppConfig {
     always_on_top: bool,
     enable_timer_limit: bool,
     timer_limit_minutes: f32,
+    target_duration_minutes: f32,
 }
 
 impl Default for AppConfig {
@@ -144,6 +145,7 @@ impl Default for AppConfig {
             always_on_top: false,
             enable_timer_limit: true,
             timer_limit_minutes: 4.5,
+            target_duration_minutes: 4.5, // 4.5 minutes default (270 seconds)
         }
     }
 }
@@ -202,6 +204,12 @@ struct TeleprompterApp {
     enable_timer_limit: bool, // Count down instead of counting up
     timer_limit_minutes: f32, // Total countdown timer in minutes
     remaining_limit_secs: f32, // Countdown state variable in seconds
+
+    // Iteration Upgrades (v1.0.8):
+    target_duration_minutes: f32, // Input target for speed calibration
+    target_scroll_y: f32, // Dampened target Y coordinate for smooth scrolling
+    fullscreen: bool,
+    prev_fullscreen: bool,
 }
 
 fn load_initial_text() -> String {
@@ -258,6 +266,11 @@ impl Default for TeleprompterApp {
             enable_timer_limit: config.enable_timer_limit,
             timer_limit_minutes: config.timer_limit_minutes,
             remaining_limit_secs: config.timer_limit_minutes * 60.0,
+
+            target_duration_minutes: config.target_duration_minutes,
+            target_scroll_y: 0.0,
+            fullscreen: false,
+            prev_fullscreen: false,
         };
         app.apply_color_preset();
         app
@@ -305,6 +318,11 @@ impl TeleprompterApp {
                 "ui_lang" => "界面语言 (UI Language):",
                 "clear_text" => "🗑️ 清空文本",
                 "load_template" => "📋 载入模板",
+                
+                // v1.0.8 keys:
+                "target_duration" => "🎯 演讲目标时长 (分钟):",
+                "calibrate_btn" => "🧮 根据目标时长自动对齐滚速",
+                "fullscreen_hint" => "• F11 / F 键：切换全屏模式 (Fullscreen)",
                 _ => "",
             },
             UiLanguage::English => match key {
@@ -344,6 +362,11 @@ impl TeleprompterApp {
                 "ui_lang" => "UI Language:",
                 "clear_text" => "🗑️ Clear Text",
                 "load_template" => "📋 Load Template",
+                
+                // v1.0.8 keys:
+                "target_duration" => "🎯 Target Duration (Minutes):",
+                "calibrate_btn" => "🧮 Align Scroll Speed to Target",
+                "fullscreen_hint" => "• F11 / F Key: Toggle borderless Fullscreen",
                 _ => "",
             }
         }
@@ -403,7 +426,7 @@ impl TeleprompterApp {
 
     fn jump_to_section(&mut self, idx: usize) {
         if idx < self.sections.len() {
-            self.scroll_y = self.sections[idx].1;
+            self.target_scroll_y = self.sections[idx].1;
             self.record_action();
         }
     }
@@ -446,8 +469,18 @@ impl TeleprompterApp {
             always_on_top: self.always_on_top,
             enable_timer_limit: self.enable_timer_limit,
             timer_limit_minutes: self.timer_limit_minutes,
+            target_duration_minutes: self.target_duration_minutes,
         };
         save_config(&config);
+    }
+
+    // Dynamic Speed Calibration based on pixel height and target duration
+    fn calibrate_speed_to_target(&mut self) {
+        let total_seconds = self.target_duration_minutes * 60.0;
+        if total_seconds > 0.0 && self.max_scroll > 0.0 {
+            self.scroll_speed = (self.max_scroll / total_seconds).clamp(5.0, 500.0);
+            self.save_settings();
+        }
     }
 }
 
@@ -519,6 +552,12 @@ impl eframe::App for TeleprompterApp {
             self.prev_always_on_top = self.always_on_top;
         }
 
+        // Viewport Fullscreen command dispatcher (v1.0.8)
+        if self.fullscreen != self.prev_fullscreen {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+            self.prev_fullscreen = self.fullscreen;
+        }
+
         // Auto-scrolling in Prompter mode (with countdown pause)
         if self.mode == AppMode::Prompter {
             if self.countdown_secs > 0.0 {
@@ -528,7 +567,7 @@ impl eframe::App for TeleprompterApp {
                 }
                 ctx.request_repaint();
             } else if self.is_playing {
-                self.scroll_y = (self.scroll_y + self.scroll_speed * dt).min(self.max_scroll);
+                self.target_scroll_y = (self.target_scroll_y + self.scroll_speed * dt).min(self.max_scroll);
                 self.elapsed_secs += dt;
                 
                 if self.enable_timer_limit {
@@ -539,6 +578,15 @@ impl eframe::App for TeleprompterApp {
                     self.is_playing = false;
                 }
                 ctx.request_repaint();
+            }
+
+            // Smooth scrolling interpolation (inertial lerp for cinema scrolling)
+            if (self.scroll_y - self.target_scroll_y).abs() > 0.05 {
+                let lerp_factor = (dt * 10.0).min(1.0); // 10.0 speed factor
+                self.scroll_y += (self.target_scroll_y - self.scroll_y) * lerp_factor;
+                ctx.request_repaint();
+            } else {
+                self.scroll_y = self.target_scroll_y;
             }
         }
 
@@ -579,6 +627,7 @@ impl TeleprompterApp {
         let old_always_on_top = self.always_on_top;
         let old_enable_timer_limit = self.enable_timer_limit;
         let old_timer_limit_minutes = self.timer_limit_minutes;
+        let old_target_duration_minutes = self.target_duration_minutes;
 
         // Evaluate all translation keys FIRST to prevent immutable-mutable borrow conflicts on self
         let tr_title = self.tr("title");
@@ -615,6 +664,11 @@ impl TeleprompterApp {
         let sc_m = self.tr("sc_m");
         let sc_g = self.tr("sc_g");
 
+        // v1.0.8 translations
+        let tr_target_duration = self.tr("target_duration");
+        let tr_calibrate_btn = self.tr("calibrate_btn");
+        let tr_fullscreen_hint = self.tr("fullscreen_hint");
+
         ui.vertical(|ui| {
             // Header bar
             ui.add_space(12.0);
@@ -624,10 +678,12 @@ impl TeleprompterApp {
                     if ui.button(tr_start_prompter).clicked() {
                         self.mode = AppMode::Prompter;
                         self.scroll_y = 0.0;
+                        self.target_scroll_y = 0.0;
                         self.countdown_secs = 3.0; // 3 seconds count down
                         self.is_playing = false;
                         self.elapsed_secs = 0.0;
                         self.remaining_limit_secs = self.timer_limit_minutes * 60.0;
+                        self.fullscreen = false;
                         self.record_action();
                         self.last_update = Instant::now();
                     }
@@ -667,6 +723,19 @@ impl TeleprompterApp {
                         }
                         ui.add_space(8.0);
 
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        // Target Duration speed calibrator (v1.0.8)
+                        ui.horizontal(|ui| {
+                            ui.label(tr_target_duration);
+                            ui.add(egui::Slider::new(&mut self.target_duration_minutes, 0.5..=10.0).suffix(" m"));
+                        });
+                        ui.add_space(4.0);
+                        if ui.button(tr_calibrate_btn).clicked() {
+                            self.calibrate_speed_to_target();
+                        }
+                        ui.add_space(8.0);
                         ui.separator();
                         ui.add_space(8.0);
 
@@ -779,6 +848,7 @@ impl TeleprompterApp {
                         ui.label(sc_num);
                         ui.label(sc_l);
                         ui.label(sc_h);
+                        ui.label(tr_fullscreen_hint);
                         ui.label(sc_minus);
                         ui.label(sc_r);
                         ui.label(sc_m);
@@ -833,6 +903,7 @@ impl TeleprompterApp {
             || old_always_on_top != self.always_on_top
             || old_enable_timer_limit != self.enable_timer_limit
             || old_timer_limit_minutes != self.timer_limit_minutes
+            || old_target_duration_minutes != self.target_duration_minutes
         {
             self.save_settings();
         }
@@ -865,6 +936,7 @@ impl TeleprompterApp {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.mode = AppMode::Edit;
             self.is_playing = false;
+            self.fullscreen = false;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
             self.scroll_speed = (self.scroll_speed + 5.0).min(500.0);
@@ -875,16 +947,17 @@ impl TeleprompterApp {
             self.record_action();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::PageUp)) {
-            self.scroll_y = (self.scroll_y - 150.0).max(0.0);
+            self.target_scroll_y = (self.target_scroll_y - 150.0).max(0.0);
             self.record_action();
             ctx.request_repaint();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::PageDown)) {
-            self.scroll_y = (self.scroll_y + 150.0).min(self.max_scroll);
+            self.target_scroll_y = (self.target_scroll_y + 150.0).min(self.max_scroll);
             self.record_action();
             ctx.request_repaint();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::R)) {
+            self.target_scroll_y = 0.0;
             self.scroll_y = 0.0;
             self.is_playing = false;
             self.countdown_secs = 0.0;
@@ -903,6 +976,11 @@ impl TeleprompterApp {
         }
         if ctx.input(|i| i.key_pressed(egui::Key::H)) {
             self.show_hud = !self.show_hud;
+            self.record_action();
+        }
+        // F11 and F key toggles borderless fullscreen in prompter mode
+        if ctx.input(|i| i.key_pressed(egui::Key::F11) || i.key_pressed(egui::Key::F)) {
+            self.fullscreen = !self.fullscreen;
             self.record_action();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::L)) {
@@ -943,8 +1021,8 @@ impl TeleprompterApp {
                 // Adjust speed when playing
                 self.scroll_speed = (self.scroll_speed + scroll_delta.y * 0.5).clamp(5.0, 500.0);
             } else if self.countdown_secs <= 0.0 {
-                // Scroll text manually when paused
-                self.scroll_y = (self.scroll_y - scroll_delta.y * 1.5).clamp(0.0, self.max_scroll);
+                // Scroll text manually when paused (adjusts the target Y for inertia)
+                self.target_scroll_y = (self.target_scroll_y - scroll_delta.y * 1.5).clamp(0.0, self.max_scroll);
             }
             self.record_action();
             ctx.request_repaint();
@@ -1239,7 +1317,7 @@ impl TeleprompterApp {
                 }
             }
 
-            // 3. Real local clock time (v1.0.7)
+            // 3. Real local clock time
             let clock_str = format!("🕒  {}", chrono::Local::now().format("%H:%M:%S"));
             let font_clock = egui::FontId::new(13.0, egui::FontFamily::Proportional);
             let clock_galley = ui.fonts(|f| f.layout(clock_str, font_clock, hud_text_color, padding - 45.0));
@@ -1401,7 +1479,7 @@ To build technical barriers, as shown in Fig. 8 in the middle, I accumulated **o
 [中文]
 工程痛点反向驱动了我对学术界的深耕。请看包含我第四个成果的第5页。
 
-left_bottom的图12是我在JCR Q1区期刊《Biomimetics》上发表的仿生无人机空间连杆机构研究，在此项研究中，我们克服了复杂湍流下的控制难题。右下角的图13是发表在自动驾驶顶级期刊《IEEE TVT》上的预测局部多重注意力（PLMA）模型。作为第二作者，我独立设计了核心进化网络拓扑，并在真实数据集上完成了高精度的风险评估验证。
+左下角的图12是我在JCR Q1区期刊《Biomimetics》上发表的仿生无人机空间连杆机构研究，在此项研究中，我们克服了复杂湍流下的控制难题。右下角的图13是发表在自动驾驶顶级期刊《IEEE TVT》上的预测局部多重注意力（PLMA）模型。作为第二作者，我独立设计了核心进化网络拓扑，并在真实数据集上完成了高精度的风险评估验证。
 
 [English]
 Engineering pain points have inversely driven my deep dive into academia. Please look at PAGE 5, covering my fourth achievement.
