@@ -378,6 +378,9 @@ struct TeleprompterApp {
     // Iteration Upgrades (v1.1.5):
     practice_mode: bool, // Toggle Memorization/Practice Mode
     enable_pace_breathing: bool, // Toggle HUD pacing metronome dot
+
+    // Iteration Upgrades (v1.1.6):
+    last_ip_refresh: Instant, // Throttle local IP resolution
 }
 
 fn load_initial_text() -> String {
@@ -467,6 +470,7 @@ impl TeleprompterApp {
             local_ip,
             practice_mode: config.practice_mode,
             enable_pace_breathing: config.enable_pace_breathing,
+            last_ip_refresh: Instant::now(),
         };
         app.apply_color_preset();
         app
@@ -847,6 +851,12 @@ impl TeleprompterApp {
                         ctx.request_repaint();
                     }
                 }
+                c if c.starts_with("scroll:") => {
+                    if let Ok(y_val) = c["scroll:".len()..].parse::<f32>() {
+                        self.target_scroll_y = y_val.clamp(0.0, self.max_scroll);
+                        ctx.request_repaint();
+                    }
+                }
                 _ => {}
             }
         }
@@ -878,6 +888,12 @@ impl eframe::App for TeleprompterApp {
         let now = Instant::now();
         let dt = now.duration_since(self.last_update).as_secs_f32();
         self.last_update = now;
+
+        // Local IP auto-refresh every 5 seconds (v1.1.6)
+        if now.duration_since(self.last_ip_refresh).as_secs() >= 5 {
+            self.local_ip = get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string());
+            self.last_ip_refresh = now;
+        }
 
         // Capture dropped files (v1.1.5)
         let dropped_path = ctx.input(|i| {
@@ -2304,6 +2320,15 @@ const REMOTE_HTML: &str = r#"<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- Real-time scroll progress slider (v1.1.6) -->
+        <div class="glass-panel rounded-2xl p-5 space-y-2 shadow-lg">
+            <div class="flex justify-between text-xs text-slate-400 uppercase tracking-widest">
+                <span>Progress</span>
+                <span id="progress-pct">0%</span>
+            </div>
+            <input type="range" id="progress-slider" min="0" max="100" value="0" class="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-500">
+        </div>
+
         <!-- Major Play/Pause Panel -->
         <div class="flex justify-center py-4">
             <button id="btn-toggle" class="w-40 h-40 rounded-full flex flex-col items-center justify-center font-bold text-lg border-4 border-slate-700 bg-slate-800 text-slate-200 transition-all active:scale-95 shadow-xl">
@@ -2350,12 +2375,21 @@ const REMOTE_HTML: &str = r#"<!DOCTYPE html>
         const txtTimer = document.getElementById('timer');
         const txtSpeed = document.getElementById('speed');
         const listSection = document.getElementById('section-list');
+        const slider = document.getElementById('progress-slider');
+        const txtProgressPct = document.getElementById('progress-pct');
 
         let sections = [];
         let activeIdx = null;
+        let maxScroll = 100.0;
 
         btnToggle.addEventListener('click', () => {
             control('toggle');
+        });
+
+        slider.addEventListener('input', (e) => {
+            const targetY = (e.target.value / 100) * maxScroll;
+            txtProgressPct.innerText = `${e.target.value}%`;
+            fetch(`/api/control?action=scroll:${targetY.toFixed(1)}`);
         });
 
         function control(action) {
@@ -2383,12 +2417,19 @@ const REMOTE_HTML: &str = r#"<!DOCTYPE html>
                         btnToggle.className = "w-40 h-40 rounded-full flex flex-col items-center justify-center font-bold text-lg border-4 border-slate-700 bg-slate-800 text-slate-200 transition-all active:scale-95 shadow-xl";
                     }
 
-                    // Update speed and timer
+                    // Update speed, timer and progress slider (v1.1.6)
                     txtSpeed.innerText = `${data.scroll_speed} px/s`;
                     
                     const m = Math.floor(data.remaining_secs / 60);
                     const s = Math.floor(data.remaining_secs % 60);
                     txtTimer.innerText = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+
+                    maxScroll = data.max_scroll;
+                    const pct = Math.round((data.scroll_y / data.max_scroll) * 100) || 0;
+                    txtProgressPct.innerText = `${pct}%`;
+                    if (!slider.matches(':active')) {
+                        slider.value = pct;
+                    }
 
                     // Populate and update chapter list if changed
                     if (JSON.stringify(sections) !== JSON.stringify(data.sections) || activeIdx !== data.active_section_idx) {
